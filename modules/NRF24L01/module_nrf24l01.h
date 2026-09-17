@@ -3,13 +3,16 @@
  * @brief   nRF24L01 2.4GHz 无线模块 —— 能力注册式收发框架
  *
  *  使用流程:
- *    1. Module_NRF24L01_Init()           初始化(SPI+GPIO+IRQ+线程)
+ *    0. 先在 CubeMX 里配好 SPI2 与 CE/CSN/IRQ 引脚(见下方"硬件"), 生成代码
+ *    1. Module_NRF24L01_Init()           初始化(配置寄存器 + 起线程)
  *    2. Module_NRF24L01_Register("名字", &var, TYPE)  注册变量
  *    3. 之后变量自动收发, 收到数据自动写回
  *
- *  硬件(SPI2 均为 PB13=SCK PB14=MISO PB15=MOSI):
- *    f103_c8(F103): CE=PB0 CSN=PB1 IRQ=PA0(EXTI0), SPI 36M/4=9MHz
- *    dji_c  (F407): CE=PF0 CSN=PB12 IRQ=PF1(EXTI1), SPI 42M/8=5.25MHz
+ *  硬件(需自行在 CubeMX 配置, 与下方宏保持一致):
+ *    SPI2: PB13=SCK PB14=MISO PB15=MOSI (模式0, ≤10MHz)
+ *          f103_c8: CE=PB0  CSN=PB1  IRQ=PA0(EXTI0)
+ *          dji_c  : CE=PF0  CSN=PB12 IRQ=PF1(EXTI1)
+ *    IRQ 需配为下降沿外部中断(EXTI), 且 it.c 中有对应 EXTIx_IRQHandler
  *
  *  @note    nRF24L01 单包载荷最大 32 字节(硬件限制), 注册总字节数不能超 32
  *  @note    收发两端注册顺序必须一致, 否则解码错位
@@ -40,8 +43,8 @@
 #endif
 
 /* ================= 硬件相关(按芯片给默认, 仍可被外部覆盖) =================
- * 引脚/SPI分频/EXTI中断线 随芯片自动选择; 本地SPI参数两块板可以不同,
- * 但射频参数(信道/速率/地址)收发两端必须一致。 */
+ * 引脚随芯片自动选择, 须与板级 CubeMX(.ioc) 配置一致(模块不配引脚, 只强制 SPI 分频);
+ * 射频参数(信道/速率/地址)收发两端必须一致。 */
 #if defined(STM32F407xx)
 /* ---- dji_c (STM32F407) ---- */
 #ifndef NRF24L01_CE_PORT
@@ -56,17 +59,11 @@
 #ifndef NRF24L01_CSN_PIN
 #define NRF24L01_CSN_PIN GPIO_PIN_12
 #endif
-#ifndef NRF24L01_IRQ_PORT
-#define NRF24L01_IRQ_PORT GPIOF
-#endif
 #ifndef NRF24L01_IRQ_PIN
 #define NRF24L01_IRQ_PIN GPIO_PIN_1
 #endif
 #ifndef NRF24L01_SPI_PRESCALER
 #define NRF24L01_SPI_PRESCALER SPI_BAUDRATEPRESCALER_8 /* APB1=42M, /8=5.25MHz */
-#endif
-#ifndef NRF24L01_EXTI_IRQn
-#define NRF24L01_EXTI_IRQn EXTI1_IRQn /* PF1 = EXTI1 */
 #endif
 #else
 /* ---- f103_c8 (STM32F103, 默认, 已验证) ---- */
@@ -82,17 +79,11 @@
 #ifndef NRF24L01_CSN_PIN
 #define NRF24L01_CSN_PIN GPIO_PIN_1
 #endif
-#ifndef NRF24L01_IRQ_PORT
-#define NRF24L01_IRQ_PORT GPIOA
-#endif
 #ifndef NRF24L01_IRQ_PIN
 #define NRF24L01_IRQ_PIN GPIO_PIN_0
 #endif
 #ifndef NRF24L01_SPI_PRESCALER
 #define NRF24L01_SPI_PRESCALER SPI_BAUDRATEPRESCALER_4 /* PCLK1=36M, /4=9MHz */
-#endif
-#ifndef NRF24L01_EXTI_IRQn
-#define NRF24L01_EXTI_IRQn EXTI0_IRQn /* PA0 = EXTI0 */
 #endif
 #endif
 

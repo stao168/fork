@@ -1,13 +1,13 @@
 # NRF24L01 模块
 
-nRF24L01 2.4GHz 无线模块驱动，能力注册式收发框架，基于 HAL + ThreadX + BSP SPI。一份源码同时支持 f103_c8(F103) 与 dji_c(F407)，靠芯片宏条件编译自动切换引脚/分频/中断线。
+nRF24L01 2.4GHz 无线模块驱动，能力注册式收发框架，基于 HAL + ThreadX + BSP SPI。一份源码同时支持 f103_c8(F103) 与 dji_c(F407)，靠芯片宏条件编译自动切换引脚与 SPI 分频。**CE/CSN/IRQ 引脚需在 CubeMX 里配好；SPI 模式/分频由模块 Init 强制设置**（见下文「CubeMX 配置」）。
 
 ## 功能特性
 
 - **能力注册式**：`Register("名字", &变量, 类型)` 后自动收发，用户不用管发送线程
 - **动态包长 (DPL)**：包长由注册总字节数决定，单包最多 32 字节（硬件限制）
 - **Enhanced ShockBurst**：硬件自动 ACK + 自动重传 + CRC，丢包率低
-- **8 种数据类型**：int8/16/32、uint8/16/32、float、double，小端序列化
+- **8 种数据类型**：int8/16/32、uint8/16/32、float、double，按尺寸小端拷贝
 - **IRQ 中断接收**：收到数据触发 EXTI 中断，信号量唤醒线程，低延迟
 - **OFFLINE 集成**：收到数据自动喂心跳，超时触发离线报警
 - **单线程架构**：一个线程同时处理定时发送和 IRQ 唤醒接收
@@ -28,10 +28,10 @@ nRF24L01 2.4GHz 无线模块驱动，能力注册式收发框架，基于 HAL + 
    set(NRF24L01_RF_DATARATE 2)   # 2Mbps，两端一致
    set(NRF24L01_TX_ENABLE  1)    # 1=发送端, 0=纯接收端，两块板分别编译
    ```
-3. **新芯片适配（F1/F4 已内置，可跳过）**：换其它芯片时，在 `module_nrf24l01.h` 硬件段照 F1/F4 加一个 `#if defined(STM32xxx)` 分支（6 个引脚宏 + SPI 分频宏 + EXTI 线宏），并在 `.c` Init 里补对应 GPIO 端口时钟使能。
+3. **新芯片适配（F1/F4 已内置，可跳过）**：换其它芯片时，在 `module_nrf24l01.h` 硬件段照 F1/F4 加一个 `#if defined(STM32xxx)` 分支（CE/CSN/IRQ 三个引脚宏 + SPI 分频宏），并在 CubeMX 里按该芯片配好 SPI2 与引脚。
 4. **应用层注册变量**：初始化后调用 `Module_NRF24L01_Register(...)`（见「使用方法」），收发两端注册顺序/类型/个数必须一致。
 5. **定主从、选板编译**：`NRF24L01_TX_ENABLE` 一块设 1、一块设 0，分别编译烧录。VS Code 里 `Ctrl+Shift+P → Tasks: Run Task`，选 **Build f103_c8** 或 **Build dji_c**——芯片宏（`STM32F103xB`/`STM32F407xx`）由板级 CMake 自动传入，**源码不用切来切去**。
-6. **上电自检**：看开机 `Reg check` 是否为标准值（见「上电自检与故障排查」）。
+6. **上电自检**：看开机日志有没有 `write verify failed` / `FEATURE=0`（见「上电自检与故障排查」）。
 
 ---
 
@@ -69,7 +69,7 @@ nRF24L01 的 SPI 接口**最高只支持 10MHz**，超过就会读写出错（�
 | f103_c8 | 72MHz | APB1 = **36MHz** | /4=9MHz，/2=18MHz(超) | **/4 = 9MHz** |
 | dji_c | 168MHz | APB1 = **42MHz** | /8=5.25MHz，/4=10.5MHz(略超) | **/8 = 5.25MHz** |
 
-原则：**选「结果 ≤10MHz 里最快」的那一档**。分频太大通信变慢，太小（超过 10MHz）模块识别不了。驱动 Init 里也会用 `NRF24L01_SPI_PRESCALER` 宏再强制设置一次，保证不依赖 CubeMX 的初始值。
+原则：**选「结果 ≤10MHz 里最快」的那一档**。分频太大通信变慢，太小（超过 10MHz）模块识别不了。驱动 Init 里会按芯片用 `NRF24L01_SPI_PRESCALER` 宏再强制设置一次，不依赖 CubeMX 的初始值。
 
 ### 1. SPI2 配置（两板一致）
 
@@ -98,7 +98,7 @@ nRF24L01 的 SPI 接口**最高只支持 10MHz**，超过就会读写出错（�
 ### 3. NVIC 配置
 
 - F103：使能 **EXTI line0 interrupt**；F407：使能 **EXTI line1 interrupt**。
-- Preemption Priority = 5，Sub Priority = 0（驱动里也会再设一次）。
+- Preemption Priority = 5，Sub Priority = 0。
 
 > CubeMX 会在 `stm32f1xx_it.c` / `stm32f4xx_it.c` 生成 `EXTIx_IRQHandler → HAL_GPIO_EXTI_IRQHandler`。模块通过 `BSP_GPIO_EXTI_Register` 注册回调，**不要自己再定义 `HAL_GPIO_EXTI_Callback`**，以免和其它模块冲突。
 
@@ -183,7 +183,7 @@ if (Module_NRF24L01_GetStatus() == 0) {
 | `NRF24L01_TX_INTERVAL_MS` | 10 | 发送间隔（ms），默认 100Hz |
 | `NRF24L01_TX_ENABLE` | 1 | 1=发送端，0=纯接收端（主从一发一收） |
 | `NRF24L01_MAX_CAPS` | 16 | 最多注册数据项数 |
-| `NRF24L01_OFFLINE_TIMEOUT_MS` | 500 | OFFLINE 心跳超时（ms） |
+| `NRF24L01_OFFLINE_TIMEOUT_MS` | 100 | OFFLINE 心跳超时（ms） |
 | `NRF24L01_RF_CHANNEL` | 2 | 射频通道：2400+N MHz |
 | `NRF24L01_RF_DATARATE` | 2 | 空中速率：1=1Mbps, 2=2Mbps |
 | `NRF24L01_RF_POWER` | 0 | 发射功率：0=0dBm, 1=-6, 2=-12, 3=-18 |
@@ -197,20 +197,20 @@ if (Module_NRF24L01_GetStatus() == 0) {
 ```
 应用层: Module_NRF24L01_Register("名字", &var, TYPE)  → 变量自动收发
     │
-框架层: 能力注册列表 → 序列化(小端) → 写TX FIFO → CE脉冲触发
-    │                    ↑ 接收: IRQ中断 → BSP回调 → 信号量 → 线程读RX FIFO → 反序列化写回
+框架层: 能力注册列表 → 按注册尺寸拷贝(小端) → 写TX FIFO → CE脉冲触发
+    │                    ↑ 接收: IRQ中断 → BSP回调 → 信号量 → 线程读RX FIFO → 按尺寸写回
 协议层: Enhanced ShockBurst(自动ACK+重传) + 动态包长(DPL) + 硬件CRC
     │
 寄存器层: SPI指令封装(读/写寄存器, 读/写载荷, 清FIFO)
     │
-底层: BSP SPI 驱动(硬件SPI2, 线程安全+互斥锁) + GPIO(CE/CSN) + EXTI(IRQ)
+底层: BSP SPI 驱动(硬件SPI2, 线程安全+互斥锁) + 板级 GPIO(CE/CSN) + 板级 EXTI(IRQ)
 ```
 
 ### 收发流程
 
-**发送**：线程到点 → 遍历注册列表序列化 → 清 TX FIFO → 写载荷 → 切 TX 模式（CE 高脉冲）→ 硬件自动 ACK+重传 → 切回 RX 模式
+**发送**：线程到点 → 按注册尺寸拷入发送缓冲区 → 清 TX FIFO → 写载荷 → 切 TX 模式（CE 高脉冲）→ 硬件自动 ACK+重传 → 切回 RX 模式
 
-**接收**：模块常驻 RX → 收到数据 → IRQ 拉低 → EXTI 中断 → BSP 回调置信号量 → 线程被唤醒 → 读 STATUS → 读动态包长 → 读载荷 → 长度匹配则反序列化写回变量 → OFFLINE 心跳 → 清中断标志
+**接收**：模块常驻 RX → 收到数据 → IRQ 拉低 → EXTI 中断 → BSP 回调置信号量 → 线程被唤醒 → 读 STATUS → 读动态包长 → 读载荷 → 长度匹配则按尺寸写回变量 → OFFLINE 心跳 → 清中断标志
 
 ---
 
@@ -236,17 +236,13 @@ if (Module_NRF24L01_GetStatus() == 0) {
 
 ## 上电自检与故障排查
 
-上电会打印一行寄存器自检，**标准值**为：
-
-```
-Reg check: CONFIG=0x0F EN_AA=0x01 AW=0x03 RF_CH=2 FEATURE=0x06 DYNPD=0x01
-```
+上电时每个寄存器写入都会**回读校验**（最多重试 3 次），失败会打印 `Reg 0xXX write verify failed: want=0x.. got=0x..`；此外单独校验 `FEATURE`（DPL/ACK 载荷必须激活成功），失败会打印 `FEATURE=0, ACTIVATE failed! DPL not enabled...`。
 
 | 现象 | 含义 / 排查方向 |
 |---|---|
-| 值与标准一致 | SPI、CE/CSN、ACTIVATE/DPL 全部正常 |
-| 全 `0x00` | SPI 没通，查 SCK / MOSI / CSN 接线与模式0 |
-| 全 `0xFF` | 查 MISO（总线一直被拉高/没接） |
+| 无 `write verify failed`、无 `FEATURE=0` | SPI、CE/CSN、ACTIVATE/DPL 全部正常 |
+| `write verify failed` 且 `got=0x00` | SPI 没通，查 SCK / MOSI / CSN 接线与模式0（CPOL=0/CPHA=0） |
+| `write verify failed` 且 `got=0xFF` | 查 MISO（总线一直被拉高/没接） |
 | `FEATURE=0` / ACTIVATE failed | SPI 通信异常，DPL 没激活，查接线和供电 |
 | TX 端 `ok=0、fail 一直涨`（no ACK） | 发送端自身正常、**对端没应答**：接收板没上电/角色不是 RX/接收端 CE 没拉高/两端参数不一致 |
 | RX 端一直 0 + OFFLINE | 没收到包，查发送端角色、信道地址、距离与供电 |

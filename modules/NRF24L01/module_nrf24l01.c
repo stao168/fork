@@ -20,10 +20,8 @@
 #include "nrf24l01_reg.h"
 #include "bsp_spi.h"
 #include "bsp_gpio.h"
-#include "bsp_def.h"
 #include "module_offline.h"
 #include "spi.h"
-#include "gpio.h"
 #include "tx_api.h"
 #include <string.h>
 
@@ -346,8 +344,11 @@ int Module_NRF24L01_Init(void)
 
     /* 静态 g_nrf 已在 .bss 清零, 无需 memset(且 memset 会清掉已注册项) */
 
-    /* ---- 1. 配置SPI: 强制模式0(CPOL=0/CPHA=0, nRF24L01要求), 并按板设波特率(≤10MHz) ----
-     * 分频 NRF24L01_SPI_PRESCALER 按芯片在 .h 选择: F103=36M/4=9M, F407=42M/8=5.25M */
+    /* CE/CSN/IRQ 引脚由板级 CubeMX 配置; 模块只强制 SPI 参数, 并注册 BSP 设备/EXTI 回调 */
+
+    /* ---- 1. SPI 参数强制 + BSP SPI 设备注册 ----
+     * 强制模式0(CPOL=0/CPHA=0, nRF24L01要求)并按芯片设分频(SCK ≤10MHz);
+     * 同 REMOTE/WT606 强制 UART 波特率: HAL_SPI_Init 会经 MSP 一并配好 SPI 引脚 */
     hspi2.Init.CLKPolarity       = SPI_POLARITY_LOW;
     hspi2.Init.CLKPhase          = SPI_PHASE_1EDGE;
     hspi2.Init.NSS               = SPI_NSS_SOFT;
@@ -358,48 +359,26 @@ int Module_NRF24L01_Init(void)
         return -1;
     }
 
-    /* ---- 2. CE 引脚初始化(推挽输出) ---- */
-    GPIO_InitTypeDef gpio = {0};
-    __HAL_RCC_GPIOB_CLK_ENABLE();
-    __HAL_RCC_GPIOA_CLK_ENABLE();
-#if defined(STM32F407xx)
-    __HAL_RCC_GPIOF_CLK_ENABLE(); /* dji_c: CE/IRQ 在 GPIOF (CubeMX 已使能, 这里再保证一次) */
-#endif
-    gpio.Pin   = NRF24L01_CE_PIN;
-    gpio.Mode  = GPIO_MODE_OUTPUT_PP;
-    gpio.Speed = GPIO_SPEED_FREQ_HIGH;
-    HAL_GPIO_Init(NRF24L01_CE_PORT, &gpio);
-    nrf_ce_low();
-
-    /* ---- 3. IRQ 引脚初始化(下降沿触发外部中断) ----
-     * 注意: 对应板的 stm32fXxx_it.c 中需有 EXTIx_IRQHandler 调用 HAL_GPIO_EXTI_IRQHandler
-     *       (CubeMX 中把 IRQ 脚配为 External Interrupt / Falling edge 即自动生成)
-     *       NVIC使能放到信号量创建之后, 防止中断提前触发访问未初始化信号量
-     */
-    gpio.Pin  = NRF24L01_IRQ_PIN;
-    gpio.Mode = GPIO_MODE_IT_FALLING;
-    gpio.Pull = GPIO_PULLUP;
-    HAL_GPIO_Init(NRF24L01_IRQ_PORT, &gpio);
-    HAL_NVIC_SetPriority(NRF24L01_EXTI_IRQn, 5, 0); /* 中断线按芯片在 .h 选择 */
-
-    /* 通过BSP注册EXTI回调(避免与其他模块的HAL_GPIO_EXTI_Callback冲突) */
-    BSP_GPIO_EXTI_Register(NRF24L01_IRQ_PIN, nrf_irq_callback);
-
-    /* ---- 4. BSP SPI 设备初始化(CSN由BSP管理) ---- */
+    /* CSN 由 BSP 管理 */
     SPI_Device_Init_Config spi_cfg = {0};
-    spi_cfg.hspi                   = &hspi2;
-    spi_cfg.cs_port                = NRF24L01_CSN_PORT;
-    spi_cfg.cs_pin                 = NRF24L01_CSN_PIN;
-    spi_cfg.tx_mode                = SPI_MODE_BLOCKING;
-    spi_cfg.rx_mode                = SPI_MODE_BLOCKING;
-    g_nrf.spi_dev                  = BSP_SPI_Device_Init(&spi_cfg);
+    spi_cfg.hspi    = &hspi2;
+    spi_cfg.cs_port = NRF24L01_CSN_PORT;
+    spi_cfg.cs_pin  = NRF24L01_CSN_PIN;
+    spi_cfg.tx_mode = SPI_MODE_BLOCKING;
+    spi_cfg.rx_mode = SPI_MODE_BLOCKING;
+    g_nrf.spi_dev   = BSP_SPI_Device_Init(&spi_cfg);
     if (g_nrf.spi_dev == NULL)
     {
         LOG_E("BSP SPI device init failed");
         return -2;
     }
 
-    /* ---- 5. nRF24L01 寄存器配置 ---- */
+    /* ---- 2. 注册 EXTI 回调(避免与其他模块的 HAL_GPIO_EXTI_Callback 冲突; 引脚/中断由板级配置) ---- */
+    BSP_GPIO_EXTI_Register(NRF24L01_IRQ_PIN, nrf_irq_callback);
+
+    nrf_ce_low(); /* 确保 CE 初始为低(寄存器配置需处于待机模式) */
+
+    /* ---- 3. nRF24L01 寄存器配置 ---- */
     tx_thread_sleep(100); /* 等待模块上电稳定(系统tick=1ms) */
 
     nrf_write_reg_checked(NRF24L01_CONFIG, NRF24L01_CONFIG_EN_CRC |     /* 使能CRC */
@@ -441,13 +420,13 @@ int Module_NRF24L01_Init(void)
     /* 进入RX模式(常驻接收) */
     nrf_set_rx_mode();
 
-    /* ---- 5.5 自检: FEATURE=0 说明 ACTIVATE 失败(DPL/ACK载荷不可用) ---- */
+    /* ---- 3.5 自检: FEATURE=0 说明 ACTIVATE 失败(DPL/ACK载荷不可用) ---- */
     if (nrf_read_reg(NRF24L01_FEATURE) == 0x00)
     {
         LOG_E("FEATURE=0, ACTIVATE failed! DPL not enabled. Check SPI wiring.");
     }
 
-    /* ---- 6. OFFLINE 集成 ---- */
+    /* ---- 4. OFFLINE 集成 ---- */
     Offline_Init_config_t offline_cfg = {0};
     offline_cfg.name                  = "nrf24l01";
     offline_cfg.timeout_ms            = NRF24L01_OFFLINE_TIMEOUT_MS;
@@ -455,11 +434,8 @@ int Module_NRF24L01_Init(void)
     offline_cfg.enable                = 1;
     g_nrf.offline_dev                 = Module_Offline_register(&offline_cfg);
 
-    /* ---- 7. 创建IRQ信号量和线程 ---- */
+    /* ---- 5. 创建IRQ信号量和线程 ---- */
     tx_semaphore_create(&g_nrf.irq_sem, "nrf_irq", 0);
-
-    /* 信号量就绪后再使能EXTI中断, 防止中断提前触发访问未初始化信号量 */
-    HAL_NVIC_EnableIRQ(NRF24L01_EXTI_IRQn);
 
     UINT ret = tx_thread_create(&g_nrf.thread, "nrf24l01", nrf_thread_entry, 0, g_nrf.thread_stack, NRF24L01_TASK_STACK_SIZE, NRF24L01_TASK_PRIORITY,
                                 NRF24L01_TASK_PRIORITY, TX_NO_TIME_SLICE, TX_AUTO_START);
