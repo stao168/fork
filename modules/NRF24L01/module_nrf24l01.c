@@ -88,8 +88,8 @@ APPS_STACK_SECTION static uint8_t g_nrf_stack[NRF24L01_TASK_STACK_SIZE];
 static TX_SEMAPHORE               g_nrf_irq_sem; /* IRQ → 接收线程 */
 #endif
 
-/* 通信地址(收发两端必须一致) */
-static const uint8_t kDefaultAddress[5] = {0x11, 0x22, 0x33, 0x44, 0x55};
+/* 通信地址(收发两端必须一致; 可在 robot.cmake 里用 NRF24L01_ADDR 覆盖) */
+static const uint8_t kAddress[5] = {NRF24L01_ADDR};
 
 /* ================= 底层: CE 控制(宏实现, 省去简单函数的调用/栈开销) ================= */
 #define nrf_ce_high() HAL_GPIO_WritePin(NRF24L01_CE_PORT, NRF24L01_CE_PIN, GPIO_PIN_SET)
@@ -461,8 +461,8 @@ void Module_NRF24L01_Init(void)
     nrf_write_reg_checked(NRF24L01_DYNPD, 0x01);                              /* 通道0动态包长 */
 
     /* 地址配置(收发两端必须一致) */
-    nrf_write_regs(NRF24L01_TX_ADDR, kDefaultAddress, 5);
-    nrf_write_regs(NRF24L01_RX_ADDR_P0, kDefaultAddress, 5);
+    nrf_write_regs(NRF24L01_TX_ADDR, kAddress, 5);
+    nrf_write_regs(NRF24L01_RX_ADDR_P0, kAddress, 5);
 
     /* 清FIFO和中断标志 */
     nrf_send_cmd(NRF24L01_FLUSH_TX);

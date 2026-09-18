@@ -101,7 +101,6 @@ set(NRF24L01_TX_INTERVAL_MS     10)    # 发送周期, 默认100Hz
 set(NRF24L01_TX_ENABLE          0)     # 1=注册发送线程(本板做发送端)
 set(NRF24L01_RX_ENABLE          0)     # 1=注册接收线程(本板做接收端); 与上一行互斥
 set(NRF24L01_OFFLINE_ENABLE     1)     # 离线检测开启(收到数据/收到ACK喂心跳)
-set(NRF24L01_RF_CHANNEL         2)     # 射频通道: 2400+N MHz (收发两端必须一致)
-set(NRF24L01_RF_DATARATE        2)     # 空中速率: 1=1Mbps, 2=2Mbps (收发两端必须一致)
-set(NRF24L01_RF_POWER           0)     # 发射功率: 0=0dBm, 1=-6dBm, 2=-12dBm, 3=-18dBm
-# MAX_CAPS / RETR_COUNT / RETR_DELAY / OFFLINE_TIMEOUT_MS 属于驱动内部定死值, 不在 rc 里暴露(见 module_nrf24l01.h)
+set(NRF24L01_ADDR              "0x11,0x22,0x33,0x44,0x55") # 5字节通信地址(逗号分隔); 收发两端必须一致
+# RF_CHANNEL / RF_DATARATE / RF_POWER / MAX_CAPS / RETR_COUNT / RETR_DELAY / OFFLINE超时
+# 均为驱动定值, 不在 rc 里暴露(见 module_nrf24l01.h)

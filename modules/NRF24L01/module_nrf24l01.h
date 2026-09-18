@@ -45,11 +45,19 @@
 #ifndef NRF24L01_OFFLINE_ENABLE
 #define NRF24L01_OFFLINE_ENABLE 1 /* 离线检测开启 */
 #endif
+#ifndef NRF24L01_ADDR
+#define NRF24L01_ADDR 0x11, 0x22, 0x33, 0x44, 0x55 /* 5字节通信地址(逗号分隔); 收发两端必须一致 */
+#endif
 
 /* ================= 驱动内部定死(不对外暴露) ================= */
 #define NRF24L01_MAX_CAPS   16 /* 最多注册多少个数据项(编译期数组大小, 与32字节载荷上限一起卡住) */
 #define NRF24L01_RETR_COUNT 3  /* 自动重传次数(0~15) */
 #define NRF24L01_RETR_DELAY 0  /* 自动重传间隔: 0=250us, 1=500us, ... 15=4000us */
+
+/* 射频参数(定值, 不复盖): 需要换信道/速率/功率时直接改这里 */
+#define NRF24L01_RF_CHANNEL  2 /* 射频通道: 2400+2=2402MHz */
+#define NRF24L01_RF_DATARATE 2 /* 空中速率: 1=1Mbps, 2=2Mbps */
+#define NRF24L01_RF_POWER    0 /* 发射功率: 0=0dBm, 1=-6dBm, 2=-12dBm, 3=-18dBm */
 
 /* ================= 硬件相关(按芯片给默认, 仍可被外部覆盖) =================
  * 引脚随芯片自动选择, 须与板级 CubeMX(.ioc) 配置一致(模块不配引脚, 只强制 SPI 参数);
@@ -100,17 +108,6 @@
 #ifndef NRF24L01_SPI_PRESCALER
 #define NRF24L01_SPI_PRESCALER SPI_BAUDRATEPRESCALER_4 /* PCLK1=36M, /4=9MHz */
 #endif
-#endif
-
-/* ================= 射频参数(可被覆盖, 收发两端必须一致) ================= */
-#ifndef NRF24L01_RF_CHANNEL
-#define NRF24L01_RF_CHANNEL 2 /* 射频通道: 2400+2=2402MHz */
-#endif
-#ifndef NRF24L01_RF_DATARATE
-#define NRF24L01_RF_DATARATE 2 /* 空中速率: 1=1Mbps, 2=2Mbps */
-#endif
-#ifndef NRF24L01_RF_POWER
-#define NRF24L01_RF_POWER 0 /* 发射功率: 0=0dBm, 1=-6dBm, 2=-12dBm, 3=-18dBm */
 #endif
 
 /* ================= 数据类型枚举 ================= */

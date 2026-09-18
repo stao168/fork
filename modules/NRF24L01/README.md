@@ -24,8 +24,7 @@ nRF24L01 2.4GHz 无线模块驱动，能力注册式收发框架，基于 HAL + 
    - `apps/<robot>/robot.cmake`：把 NRF24L01 加入模块列表并设置射频参数/收发角色（见下）。
    ```cmake
    set(MODULES_SINGLE   OFFLINE NRF24L01)
-   set(NRF24L01_RF_CHANNEL  2)   # 2402MHz，两端一致
-   set(NRF24L01_RF_DATARATE 2)   # 2Mbps，两端一致
+   set(NRF24L01_ADDR         "0x11,0x22,0x33,0x44,0x55")  # 5字节地址（逗号分隔），两端一致
    set(NRF24L01_TX_ENABLE  1)    # 1=注册发送线程
    set(NRF24L01_RX_ENABLE  0)    # 1=注册接收线程；与上一行互斥，只能开一个
    ```
@@ -183,13 +182,11 @@ if (Module_NRF24L01_GetStatus() == 0) {
 | `NRF24L01_TX_ENABLE` | 0 | 1=注册发送线程（本板做发送端）；与下一行**必须且只能选一个** |
 | `NRF24L01_RX_ENABLE` | 0 | 1=注册接收线程（本板做接收端） |
 | `NRF24L01_OFFLINE_ENABLE` | 1 | 离线检测开启 |
-| `NRF24L01_RF_CHANNEL` | 2 | 射频通道：2400+N MHz |
-| `NRF24L01_RF_DATARATE` | 2 | 空中速率：1=1Mbps, 2=2Mbps |
-| `NRF24L01_RF_POWER` | 0 | 发射功率：0=0dBm, 1=-6, 2=-12, 3=-18 |
+| `NRF24L01_ADDR` | `0x11,0x22,0x33,0x44,0x55` | 5 字节通信地址（逗号分隔，**不能有空格**）；收发两端必须一致 |
 
-> `MAX_CAPS`(16) / `RETR_COUNT`(3) / `RETR_DELAY`(250us) / OFFLINE 心跳超时(100ms) 属于驱动内部定死值，**不在 `robot.cmake` 里暴露**，写在 `module_nrf24l01.h` / `.c` 里。
+> `RF_CHANNEL`(2, 即 2402MHz) / `RF_DATARATE`(2Mbps) / `RF_POWER`(0dBm) / `MAX_CAPS`(16) / `RETR_COUNT`(3) / `RETR_DELAY`(250us) / OFFLINE 心跳超时(100ms) 均为**驱动定值**，不在 `robot.cmake` 里暴露，写在 `module_nrf24l01.h` / `.c` 里；要改直接改默认值。
 
-> **收发两端必须一致的参数**：`RF_CHANNEL`、`RF_DATARATE`、固定 5 字节地址、CRC/EN_AA/地址宽度（驱动写死）、以及注册顺序与类型。
+> **收发两端必须一致的参数**：信道/速率（驱动定值 2402MHz/2Mbps）、`NRF24L01_ADDR`、CRC/EN_AA/地址宽度（驱动写死）、以及注册顺序与类型。
 
 ## 架构说明
 
