@@ -10,7 +10,7 @@ nRF24L01 2.4GHz 无线模块驱动，能力注册式收发框架，基于 HAL + 
 - **8 种数据类型**：int8/16/32、uint8/16/32、float、double，按尺寸小端拷贝
 - **IRQ 中断接收**：收到数据触发 EXTI 中断，信号量唤醒线程，低延迟
 - **OFFLINE 集成**：收到数据 / 收到 ACK 自动喂心跳，超时触发离线报警
-- **收发双线程**：发送线程只管定时发送、接收线程只管 IRQ 接收，用 `TX_ENABLE`/`RX_ENABLE` 选角色，不用哪边就不编译（连线程栈都不占）
+- **单线程**：一个线程一个栈，与其它模块写法一致；线程入口按角色编译（发就只调发送、收就只调接收）
 - **跨芯片**：F103/F407 同一套源码，选对 Build 任务即可，射频参数两端一致时可互通
 
 ---
@@ -27,12 +27,13 @@ nRF24L01 2.4GHz 无线模块驱动，能力注册式收发框架，基于 HAL + 
    set(NRF24L01_RF_CHANNEL  2)   # 2402MHz，两端一致
    set(NRF24L01_RF_DATARATE 2)   # 2Mbps，两端一致
    set(NRF24L01_TX_ENABLE  1)    # 1=注册发送线程
-   set(NRF24L01_RX_ENABLE  0)    # 1=注册接收线程；两个都 1 即双向
+   set(NRF24L01_RX_ENABLE  0)    # 1=注册接收线程；与上一行互斥，只能开一个
    ```
-   > `TX_ENABLE`/`RX_ENABLE` **默认都是 0**，即不注册任何线程（只配寄存器、不传数据）。必须明确选定角色。
+   > 两个宏**必须且只能选一个**：都开会在编译期 `#error`（半双工，同板收发没意义），都不开也会 `#error`（模块什么都不做）。
+   > 需要双向通信就**两块板各选一个角色**（一块只发、一块只收）。
 3. **新芯片适配（F1/F4 已内置，可跳过）**：换其它芯片时，在 `module_nrf24l01.h` 硬件段照 F1/F4 加一个 `#if defined(STM32xxx)` 分支（CE/CSN/IRQ 三个引脚宏 + SPI 分频宏），并在 CubeMX 里按该芯片配好 SPI2 与引脚。
 4. **应用层注册变量**：初始化后调用 `Module_NRF24L01_Register(...)`（见「使用方法」），收发两端注册顺序/类型/个数必须一致。
-5. **定角色、选板编译**：`TX_ENABLE`/`RX_ENABLE` 按角色设 1（一块发、一块收就各自设一个），分别编译烧录。VS Code 里 `Ctrl+Shift+P → Tasks: Run Task`，选 **Build f103_c8** 或 **Build dji_c**——芯片宏（`STM32F103xB`/`STM32F407xx`）由板级 CMake 自动传入，**源码不用切来切去**。
+5. **定角色、选板编译**：`TX_ENABLE` 和 `RX_ENABLE` **互斥**，一块板只开其中一个（一块发、一块收），分别编译烧录。VS Code 里 `Ctrl+Shift+P → Tasks: Run Task`，选 **Build f103_c8** 或 **Build dji_c**——芯片宏（`STM32F103xB`/`STM32F407xx`）由板级 CMake 自动传入，**源码不用切来切去**。
 6. **上电自检**：看开机日志有没有 `write verify failed` / `FEATURE=0`（见「上电自检与故障排查」）。
 
 ---
@@ -177,17 +178,16 @@ if (Module_NRF24L01_GetStatus() == 0) {
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `NRF24L01_TASK_STACK_SIZE` | 1024 | 线程栈大小 |
-| `NRF24L01_TASK_PRIORITY` | 1 | 线程优先级（别太低，否则会被打印线程抢占导致收发卡顿） |
+| `NRF24L01_TASK_PRIORITY` | 10 | 线程优先级；与其它模块同档（INS=7、REMOTE=8~9、VISION/REFEREE/本模块=10、MOTOR=12） |
 | `NRF24L01_TX_INTERVAL_MS` | 10 | 发送间隔（ms），默认 100Hz |
-| `NRF24L01_TX_ENABLE` | 0 | 1=注册发送线程（本板做发送端） |
-| `NRF24L01_RX_ENABLE` | 0 | 1=注册接收线程（本板做接收端）；两个都 1 即双向 |
-| `NRF24L01_MAX_CAPS` | 16 | 最多注册数据项数 |
-| `NRF24L01_OFFLINE_TIMEOUT_MS` | 100 | OFFLINE 心跳超时（ms） |
+| `NRF24L01_TX_ENABLE` | 0 | 1=注册发送线程（本板做发送端）；与下一行**必须且只能选一个** |
+| `NRF24L01_RX_ENABLE` | 0 | 1=注册接收线程（本板做接收端） |
+| `NRF24L01_OFFLINE_ENABLE` | 1 | 离线检测开启 |
 | `NRF24L01_RF_CHANNEL` | 2 | 射频通道：2400+N MHz |
 | `NRF24L01_RF_DATARATE` | 2 | 空中速率：1=1Mbps, 2=2Mbps |
 | `NRF24L01_RF_POWER` | 0 | 发射功率：0=0dBm, 1=-6, 2=-12, 3=-18 |
-| `NRF24L01_RETR_COUNT` | 3 | 自动重传次数（0~15） |
-| `NRF24L01_RETR_DELAY` | 0 | 重传间隔：0=250us, 1=500us... |
+
+> `MAX_CAPS`(16) / `RETR_COUNT`(3) / `RETR_DELAY`(250us) / OFFLINE 心跳超时(100ms) 属于驱动内部定死值，**不在 `robot.cmake` 里暴露**，写在 `module_nrf24l01.h` / `.c` 里。
 
 > **收发两端必须一致的参数**：`RF_CHANNEL`、`RF_DATARATE`、固定 5 字节地址、CRC/EN_AA/地址宽度（驱动写死）、以及注册顺序与类型。
 
@@ -207,7 +207,7 @@ if (Module_NRF24L01_GetStatus() == 0) {
 
 ### 收发流程
 
-**发送**：线程到点 → 按注册尺寸拷入发送缓冲区 → 清 TX FIFO → 写载荷 → 切 TX 模式（CE 高脉冲）→ 硬件自动 ACK+重传 → 切回 RX 模式
+**发送**：线程到点 → 按注册尺寸拷入发送缓冲区 → 清 TX FIFO → 写载荷 → 切 TX 模式（CE 高脉冲）→ 硬件自动 ACK+重传 → 轮询 STATUS → 收到 TX_DS 才算成功并喂心跳
 
 **接收**：模块常驻 RX → 收到数据 → IRQ 拉低 → EXTI 中断 → BSP 回调置信号量 → 线程被唤醒 → 读 STATUS → 读动态包长 → 读载荷 → 长度匹配则按尺寸写回变量 → OFFLINE 心跳 → 清中断标志
 
@@ -226,10 +226,10 @@ if (Module_NRF24L01_GetStatus() == 0) {
 **协议一致性（两端必须相同，否则收不到）**
 5. 射频参数一致：信道、5 字节地址、空中速率、CRC、EN_AA、地址宽度；别只给一端烧旧固件。
 6. 两端 **Register 顺序/类型/个数完全一致**，否则解码错位；单包载荷 **≤32 字节**，超了注册返回 -1。
-7. **一发一收**：一块板只开 `TX_ENABLE`、另一块只开 `RX_ENABLE`，分别编译烧录；不要两块同时发（半双工，会空中冲突）。两个都开时模块内部用互斥锁串行化收发，不会互相踩 SPI，但两端同时发仍会碰撞。
+7. **一发一收**：一块板只开 `TX_ENABLE`、另一块只开 `RX_ENABLE`，分别编译烧录。两者必须且只能选一个，同板都不选就 `#error`。
 
 **软件**
-8. nRF 线程优先级别太低（曾因与打印线程同级被抢占，出现"通一会断"，默认已设为 1）。
+8. **优先级取模块公档（默认 10）**：太高（如 1）会让发送时最长 3ms 的轮询忙等（不让出 CPU）扰其他任务；太低则会被抢占导致超时。发送结果判定已改为“只认 TX_DS(ACK)”，不会被抢占误报成功。
 9. 模块通过 `BSP_GPIO_EXTI_Register` 统一注册 EXTI 回调，**不要再自定义 `HAL_GPIO_EXTI_Callback`**。
 10. F407 每次 CubeMX 重新生成后，删掉 it.c 里 `PendSV_Handler`/`SysTick_Handler`/`OTG_FS_IRQHandler`（见「CubeMX 配置 5」）。
 
@@ -245,7 +245,7 @@ if (Module_NRF24L01_GetStatus() == 0) {
 | `FEATURE=0` / ACTIVATE failed | SPI 通信异常，DPL 没激活，查接线和供电 |
 | TX 端 `ok=0、fail 一直涨`（no ACK） | 发送端自身正常、**对端没应答**：接收板没上电/角色不是 RX/接收端 CE 没拉高/两端参数不一致 |
 | RX 端一直 0 + OFFLINE | 没收到包，查发送端角色、信道地址、距离与供电 |
-| 开机短暂 ONLINE 后才 OFFLINE | 正常：初始默认在线，超过 `OFFLINE_TIMEOUT` 没收到包才判离线 |
+| 开机短暂 ONLINE 后才 OFFLINE | 正常：初始默认在线，超过 100ms 没收到包/没收到 ACK 才判离线 |
 
 > `TX failed(no ACK)` 每累计 50 次失败才打印一条，**不是"偶发失败"，看到它在涨就是这段时间一直没收到 ACK**；调通后 `ok` 持续增长、该警告自然消失。
 

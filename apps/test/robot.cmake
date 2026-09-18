@@ -15,6 +15,6 @@ set(NRF24L01_RF_CHANNEL     2)     # 2402MHz
 set(NRF24L01_RF_DATARATE    2)     # 2Mbps
 set(NRF24L01_RF_POWER       0)     # 0dBm
 set(NRF24L01_TX_INTERVAL_MS 10)    # 100Hz
-set(NRF24L01_TX_ENABLE      0)     # 1=注册发送线程
-set(NRF24L01_RX_ENABLE      1)     # 1=注册接收线程; 两个都1则双向
+set(NRF24L01_TX_ENABLE      0)     # 1=发送端
+set(NRF24L01_RX_ENABLE      1)     # 1=接收端; 两者必须且只能选一个
 # 注意: SPI2 与 CE/CSN/IRQ 引脚需在板级 CubeMX 配好(见 module_nrf24l01.h 硬件说明)

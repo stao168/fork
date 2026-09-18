@@ -4,7 +4,7 @@
  *
  *  使用流程:
  *    0. 先在 CubeMX 里配好 SPI2 与 CE/CSN/IRQ 引脚(见下方"硬件"), 生成代码
- *    1. 在 robot.cmake 里选定角色(见下方 NRF24L01_TX_ENABLE / NRF24L01_RX_ENABLE)
+ *    1. 在 robot.cmake 里选定角色(见下方 NRF24L01_TX_ENABLE / NRF24L01_RX_ENABLE, 二者互斥)
  *    2. Module_NRF24L01_Init()           初始化(配置寄存器 + 按角色起线程)
  *    3. Module_NRF24L01_Register("名字", &var, TYPE)  注册变量
  *    4. 之后变量自动收发, 收到数据自动写回
@@ -28,7 +28,7 @@
 #define NRF24L01_TASK_STACK_SIZE 1024 /* 线程栈大小 */
 #endif
 #ifndef NRF24L01_TASK_PRIORITY
-#define NRF24L01_TASK_PRIORITY 1 /* 线程优先级 */
+#define NRF24L01_TASK_PRIORITY 10 /* 线程优先级; 与其它模块同档(INS=7/REMOTE=8-9/本模块=VISION=REFEREE=10/MOTOR=12) */
 #endif
 #ifndef NRF24L01_TX_INTERVAL_MS
 #define NRF24L01_TX_INTERVAL_MS 10 /* 自动发送间隔(ms), 默认100Hz */
@@ -39,14 +39,17 @@
 #ifndef NRF24L01_RX_ENABLE
 #define NRF24L01_RX_ENABLE 0 /* 1=注册接收线程(本板做接收端) */
 #endif
-/* 两个都为1: 本板收发双向; 都为0: 只配置芯片不传输数据。
- * nRF24L01 是半双工, 双向时模块内部用互斥锁串行化, 且两端同时发容易空中碰撞。 */
-#ifndef NRF24L01_MAX_CAPS
-#define NRF24L01_MAX_CAPS 16 /* 最多注册多少个数据项 */
+/* 两者必须且只能选一个。
+ * 同时开会 #error(nRF24L01 半双工, 同板收发没有意义); 都不开会 #error(模块什么都不做)。
+ * 需要双向通信就两块板各选一个角色。 */
+#ifndef NRF24L01_OFFLINE_ENABLE
+#define NRF24L01_OFFLINE_ENABLE 1 /* 离线检测开启 */
 #endif
-#ifndef NRF24L01_OFFLINE_TIMEOUT_MS
-#define NRF24L01_OFFLINE_TIMEOUT_MS 100 /* OFFLINE心跳超时(ms); 与 module_config.cmake 默认保持一致 */
-#endif
+
+/* ================= 驱动内部定死(不对外暴露) ================= */
+#define NRF24L01_MAX_CAPS   16 /* 最多注册多少个数据项(编译期数组大小, 与32字节载荷上限一起卡住) */
+#define NRF24L01_RETR_COUNT 3  /* 自动重传次数(0~15) */
+#define NRF24L01_RETR_DELAY 0  /* 自动重传间隔: 0=250us, 1=500us, ... 15=4000us */
 
 /* ================= 硬件相关(按芯片给默认, 仍可被外部覆盖) =================
  * 引脚随芯片自动选择, 须与板级 CubeMX(.ioc) 配置一致(模块不配引脚, 只强制 SPI 参数);
@@ -108,12 +111,6 @@
 #endif
 #ifndef NRF24L01_RF_POWER
 #define NRF24L01_RF_POWER 0 /* 发射功率: 0=0dBm, 1=-6dBm, 2=-12dBm, 3=-18dBm */
-#endif
-#ifndef NRF24L01_RETR_COUNT
-#define NRF24L01_RETR_COUNT 3 /* 自动重传次数(0~15) */
-#endif
-#ifndef NRF24L01_RETR_DELAY
-#define NRF24L01_RETR_DELAY 0 /* 自动重传间隔: 0=250us, 1=500us, ... 15=4000us */
 #endif
 
 /* ================= 数据类型枚举 ================= */

@@ -30,6 +30,13 @@
 #define LOG_LVL LOG_LVL_INFO
 #include "ulog_def.h"
 
+/* 收发角色: 必须且只能选一个 —— nRF24L01 半双工, 同板同时收发没有意义; 不选角色则模块什么都不做 */
+#if NRF24L01_TX_ENABLE && NRF24L01_RX_ENABLE
+#error "NRF24L01: NRF24L01_TX_ENABLE and NRF24L01_RX_ENABLE are mutually exclusive, pick exactly one role"
+#elif !NRF24L01_TX_ENABLE && !NRF24L01_RX_ENABLE
+#error "NRF24L01: no role selected, set NRF24L01_TX_ENABLE or NRF24L01_RX_ENABLE to 1"
+#endif
+
 /* BSP_SPI_TransReceive 超时(tick, 1 tick = 1ms) */
 #define NRF24L01_SPI_TIMEOUT 100
 
@@ -73,40 +80,16 @@ typedef struct
 
 static NRF_Ctx_t g_nrf;
 
-/* 收发角色: 由 NRF24L01_TX_ENABLE / NRF24L01_RX_ENABLE 选择(默认都不启用, 见 .h) */
-
-/* 线程/信号量/栈/锁: 放文件作用域(栈需要 APPS_STACK_SECTION, 不能放进结构体) */
+/* 模块内部变量: 线程/栈/信号量按其它模块(INS/REMOTE/WT606)的写法放在文件作用域
+ * (栈需要 APPS_STACK_SECTION, 不能放进结构体) */
+static TX_THREAD                  g_nrf_thread;
+APPS_STACK_SECTION static uint8_t g_nrf_stack[NRF24L01_TASK_STACK_SIZE];
 #if NRF24L01_RX_ENABLE
-static TX_THREAD                  g_nrf_rx_thread;
-static TX_SEMAPHORE               g_nrf_irq_sem;
-APPS_STACK_SECTION static uint8_t g_nrf_rx_stack[NRF24L01_TASK_STACK_SIZE];
-#endif
-#if NRF24L01_TX_ENABLE
-static TX_THREAD                  g_nrf_tx_thread;
-APPS_STACK_SECTION static uint8_t g_nrf_tx_stack[NRF24L01_TASK_STACK_SIZE];
-#endif
-
-/* nRF 半双工: 只有收发线程同时存在才需要互斥; 单角色时宏展开为空, 不占 RAM 也无调用开销 */
-#if NRF24L01_TX_ENABLE && NRF24L01_RX_ENABLE
-#define NRF24L01_NEED_LOCK 1
-static TX_MUTEX g_nrf_lock;
-#define nrf_lock_get() tx_mutex_get(&g_nrf_lock, TX_WAIT_FOREVER)
-#define nrf_lock_put() tx_mutex_put(&g_nrf_lock)
-#else
-#define nrf_lock_get() ((void)0)
-#define nrf_lock_put() ((void)0)
+static TX_SEMAPHORE               g_nrf_irq_sem; /* IRQ → 接收线程 */
 #endif
 
 /* 通信地址(收发两端必须一致) */
 static const uint8_t kDefaultAddress[5] = {0x11, 0x22, 0x33, 0x44, 0x55};
-
-/* ================= 前向声明 ================= */
-#if NRF24L01_RX_ENABLE
-static void nrf_rx_thread_entry(ULONG arg);
-#endif
-#if NRF24L01_TX_ENABLE
-static void nrf_tx_thread_entry(ULONG arg);
-#endif
 
 /* ================= 底层: CE 控制(宏实现, 省去简单函数的调用/栈开销) ================= */
 #define nrf_ce_high() HAL_GPIO_WritePin(NRF24L01_CE_PORT, NRF24L01_CE_PIN, GPIO_PIN_SET)
@@ -118,7 +101,7 @@ static void nrf_tx_thread_entry(ULONG arg);
 #define nrf_spi(len) BSP_SPI_TransReceive(g_nrf.spi_dev, g_nrf.spi_buf, g_nrf.spi_buf, (uint16_t)(len), NRF24L01_SPI_TIMEOUT)
 
 /* 发命令帧: [0]=命令, [1..]=datalen 字节数据(数据由调用方先填好) */
-static void nrf_cmd(uint8_t cmd, uint8_t datalen)
+static inline void nrf_cmd(uint8_t cmd, uint8_t datalen)
 {
     g_nrf.spi_buf[0] = cmd;
     nrf_spi(1 + datalen);
@@ -127,7 +110,7 @@ static void nrf_cmd(uint8_t cmd, uint8_t datalen)
 /**
  * @brief 读寄存器(1字节)
  */
-static uint8_t nrf_read_reg(uint8_t reg)
+static inline uint8_t nrf_read_reg(uint8_t reg)
 {
     g_nrf.spi_buf[1] = NRF24L01_NOP;
     nrf_cmd(NRF24L01_R_REGISTER | reg, 1);
@@ -137,7 +120,7 @@ static uint8_t nrf_read_reg(uint8_t reg)
 /**
  * @brief 写寄存器(1字节)
  */
-static void nrf_write_reg(uint8_t reg, uint8_t value)
+static inline void nrf_write_reg(uint8_t reg, uint8_t value)
 {
     g_nrf.spi_buf[1] = value;
     nrf_cmd(NRF24L01_W_REGISTER | reg, 1);
@@ -164,7 +147,7 @@ static int8_t nrf_write_reg_checked(uint8_t reg, uint8_t value)
 /**
  * @brief 写寄存器(多字节, 如地址)
  */
-static void nrf_write_regs(uint8_t reg, const uint8_t *buf, uint8_t len)
+static inline void nrf_write_regs(uint8_t reg, const uint8_t *buf, uint8_t len)
 {
     memcpy(&g_nrf.spi_buf[1], buf, len);
     nrf_cmd(NRF24L01_W_REGISTER | reg, len);
@@ -174,7 +157,7 @@ static void nrf_write_regs(uint8_t reg, const uint8_t *buf, uint8_t len)
 /**
  * @brief 读 RX 有效载荷到 spi_buf[1..]
  */
-static void nrf_read_rx_payload(uint8_t len)
+static inline void nrf_read_rx_payload(uint8_t len)
 {
     memset(&g_nrf.spi_buf[1], NRF24L01_NOP, len);
     nrf_cmd(NRF24L01_R_RX_PAYLOAD, len);
@@ -184,8 +167,8 @@ static void nrf_read_rx_payload(uint8_t len)
 #if NRF24L01_TX_ENABLE
 /**
  * @brief 发送 spi_buf[1..] 中的TX载荷(调用方已组包)
- */ 
-static void nrf_write_tx_payload(uint8_t len)
+ */
+static inline void nrf_write_tx_payload(uint8_t len)
 {
     nrf_cmd(NRF24L01_W_TX_PAYLOAD, len);
 }
@@ -194,7 +177,7 @@ static void nrf_write_tx_payload(uint8_t len)
 /**
  * @brief 发送单字节命令(清FIFO等)
  */
-static void nrf_send_cmd(uint8_t cmd)
+static inline void nrf_send_cmd(uint8_t cmd)
 {
     nrf_cmd(cmd, 0);
 }
@@ -202,7 +185,7 @@ static void nrf_send_cmd(uint8_t cmd)
 /**
  * @brief 激活FEATURE寄存器(nRF24L01+必需, 否则DPL/ACK载荷等功能不可用)
  */
-static void nrf_activate_feature(void)
+static inline void nrf_activate_feature(void)
 {
     g_nrf.spi_buf[1] = NRF24L01_ACTIVATE_DATA;
     nrf_cmd(NRF24L01_ACTIVATE, 1);
@@ -214,7 +197,7 @@ static void nrf_activate_feature(void)
 /**
  * @brief 读状态寄存器
  */
-static uint8_t nrf_read_status(void)
+static inline uint8_t nrf_read_status(void)
 {
     nrf_cmd(NRF24L01_NOP, 0);
     return g_nrf.spi_buf[0];
@@ -266,7 +249,9 @@ static void nrf_enter_tx(void)
     nrf_config_update(0, NRF24L01_CONFIG_PRIM_RX);
 }
 
-/* 等发送结束: 轮询 STATUS 直到 TX_DS/MAX_RT(超时按失败算), 返回最终 STATUS */
+/* 等发送结束: 轮询 STATUS 直到 TX_DS/MAX_RT, 返回最后读到的 STATUS
+ * @note  超时也返回"最后读到的状态"而不是硬编 MAX_RT —— 线程被抢占时标志可能已置位,
+ *        硬编会把成功报成失败(低优先级下"通一会断"的根因) */
 static uint8_t nrf_wait_tx_done(void)
 {
     ULONG start = tx_time_get();
@@ -275,27 +260,27 @@ static uint8_t nrf_wait_tx_done(void)
     {
         uint8_t status = nrf_read_status();
         if (status & (NRF24L01_STATUS_TX_DS | NRF24L01_STATUS_MAX_RT)) return status;
-        if ((tx_time_get() - start) >= NRF24L01_TX_WAIT_MS) return NRF24L01_STATUS_MAX_RT;
+        if ((tx_time_get() - start) >= NRF24L01_TX_WAIT_MS) return status;
     }
 }
 
-/* 发送结果统计: TX_DS=收到ACK, MAX_RT=重传耗尽(对端没收到) */
+/* 发送结果统计: 只有收到 TX_DS(ACK) 才算成功; MAX_RT 与超时都算失败 */
 static void nrf_check_tx_result(uint8_t tx_status)
 {
     static uint16_t s_tx_ok = 0, s_tx_fail = 0;
 
-    if (tx_status & NRF24L01_STATUS_MAX_RT)
+    if (tx_status & NRF24L01_STATUS_TX_DS)
+    {
+        s_tx_ok++;
+        /* 收到 ACK 说明链路通 → 喂心跳, 让"只发不收"的板也能显示在线 */
+        if (g_nrf.offline_dev) Module_Offline_device_update(g_nrf.offline_dev);
+    }
+    else
     {
         s_tx_fail++;
         /* 每50次失败打印一次, 避免刷屏 */
         if ((s_tx_fail % 50) == 1) LOG_W("TX failed(no ACK): ok=%u fail=%u, check receiver/channel/address", s_tx_ok, s_tx_fail);
         nrf_send_cmd(NRF24L01_FLUSH_TX);
-    }
-    else
-    {
-        s_tx_ok++;
-        /* 收到 ACK 说明链路通 → 喂心跳, 让"只发不收"的板也能显示在线 */
-        if (g_nrf.offline_dev) Module_Offline_device_update(g_nrf.offline_dev);
     }
     nrf_write_reg(NRF24L01_STATUS, NRF24L01_STATUS_TX_DS | NRF24L01_STATUS_MAX_RT);
 }
@@ -316,9 +301,6 @@ static void nrf_trigger_tx(void)
     nrf_ce_low();
 
     nrf_check_tx_result(tx_status); /* 5. 统计+清标志 */
-#if NRF24L01_RX_ENABLE
-    nrf_set_rx_mode(); /* 6. 切回RX常驻接收 */
-#endif
 }
 
 #endif /* NRF24L01_TX_ENABLE */
@@ -365,39 +347,32 @@ static void nrf_handle_rx(void)
 
 /* ================= 线程 ================= */
 
+/* 收发互斥, 只编译当前角色的线程入口 */
 #if NRF24L01_RX_ENABLE
-/* 接收线程: IRQ(或兜底超时)唤醒 → 只做接收 */
-static void nrf_rx_thread_entry(ULONG arg)
+/* 接收: IRQ(或兜底超时)唤醒 → 只做接收 */
+static void nrf_thread_entry(ULONG arg)
 {
     (void)arg;
 
     while (1)
     {
         tx_semaphore_get(&g_nrf_irq_sem, NRF24L01_RX_POLL_MS);
-
-        nrf_lock_get();
         nrf_handle_rx();
-        nrf_lock_put();
     }
 }
-#endif /* NRF24L01_RX_ENABLE */
-
-#if NRF24L01_TX_ENABLE
-/* 发送线程: 定时 → 只做发送 */
-static void nrf_tx_thread_entry(ULONG arg)
+#elif NRF24L01_TX_ENABLE
+/* 发送: 定时唤醒 → 只做发送 */
+static void nrf_thread_entry(ULONG arg)
 {
     (void)arg;
 
     while (1)
     {
         tx_thread_sleep(NRF24L01_TX_INTERVAL_MS);
-
-        nrf_lock_get();
         nrf_trigger_tx();
-        nrf_lock_put();
     }
 }
-#endif /* NRF24L01_TX_ENABLE */
+#endif
 
 /* ================= EXTI 中断回调(通过BSP注册) ================= */
 
@@ -508,38 +483,22 @@ void Module_NRF24L01_Init(void)
     /* ---- 4. OFFLINE 集成 ---- */
     Offline_Init_config_t offline_cfg = {0};
     offline_cfg.name                  = "nrf24l01";
-    offline_cfg.timeout_ms            = NRF24L01_OFFLINE_TIMEOUT_MS;
+    offline_cfg.timeout_ms            = 100;
     offline_cfg.beep_times            = 3;
-    offline_cfg.enable                = 1;
+    offline_cfg.enable                = NRF24L01_OFFLINE_ENABLE;
     g_nrf.offline_dev                 = Module_Offline_register(&offline_cfg);
 
-    /* ---- 5. 按启用的角色创建信号量/互斥锁/线程(两个都为0则不注册任何线程) ---- */
+    /* ---- 5. 创建信号量/线程 ---- */
 #if NRF24L01_RX_ENABLE
     tx_semaphore_create(&g_nrf_irq_sem, "nrf_irq", 0);
 #endif
-#if NRF24L01_NEED_LOCK
-    tx_mutex_create(&g_nrf_lock, "nrf_lock", TX_INHERIT);
-#endif
 
-#if NRF24L01_RX_ENABLE
-    if (tx_thread_create(&g_nrf_rx_thread, "nrf_rx", nrf_rx_thread_entry, 0, g_nrf_rx_stack, NRF24L01_TASK_STACK_SIZE, NRF24L01_TASK_PRIORITY,
+    if (tx_thread_create(&g_nrf_thread, "nrf24l01", nrf_thread_entry, 0, g_nrf_stack, NRF24L01_TASK_STACK_SIZE, NRF24L01_TASK_PRIORITY,
                          NRF24L01_TASK_PRIORITY, TX_NO_TIME_SLICE, TX_AUTO_START) != TX_SUCCESS)
     {
-        LOG_E("RX thread create failed");
+        LOG_E("Thread create failed");
         return;
     }
-#endif
-#if NRF24L01_TX_ENABLE
-    if (tx_thread_create(&g_nrf_tx_thread, "nrf_tx", nrf_tx_thread_entry, 0, g_nrf_tx_stack, NRF24L01_TASK_STACK_SIZE, NRF24L01_TASK_PRIORITY,
-                         NRF24L01_TASK_PRIORITY, TX_NO_TIME_SLICE, TX_AUTO_START) != TX_SUCCESS)
-    {
-        LOG_E("TX thread create failed");
-        return;
-    }
-#endif
-#if !NRF24L01_TX_ENABLE && !NRF24L01_RX_ENABLE
-    LOG_W("TX/RX both disabled: only chip registers configured, no data transfer");
-#endif
 
     g_nrf.initialized = 1;
     LOG_I("NRF24L01 initialized: ch=%d rate=%dMbps power=%ddBm tx=%d rx=%d", NRF24L01_RF_CHANNEL, NRF24L01_RF_DATARATE,
