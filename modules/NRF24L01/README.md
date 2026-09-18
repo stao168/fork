@@ -69,21 +69,25 @@ nRF24L01 的 SPI 接口**最高只支持 10MHz**，超过就会读写出错（�
 | f103_c8 | 72MHz | APB1 = **36MHz** | /4=9MHz，/2=18MHz(超) | **/4 = 9MHz** |
 | dji_c | 168MHz | APB1 = **42MHz** | /8=5.25MHz，/4=10.5MHz(略超) | **/8 = 5.25MHz** |
 
-原则：**选「结果 ≤10MHz 里最快」的那一档**。分频太大通信变慢，太小（超过 10MHz）模块识别不了。驱动 Init 里会按芯片用 `NRF24L01_SPI_PRESCALER` 宏再强制设置一次，不依赖 CubeMX 的初始值。
+原则：**选「结果 ≤10MHz 里最快」的那一档**。分频太大通信变慢，太小（超过 10MHz）模块识别不了。
 
-### 1. SPI2 配置（两板一致）
+> 注意：驱动 `Init()` 会对 `hspi2.Init` 的 **CPOL / CPHA / NSS / 分频** 重新赋值再 `HAL_SPI_Init()`，
+> 也就是**这几项以代码为准，CubeMX 里设什么都不影响最终结果**；
+> 其余项（Master / 8bit / MSB / 软件 NSS / CRC 关）模块不改，**必须在 CubeMX 里配对**。
 
-- **Mode**: Full-Duplex Master
-- **Hardware NSS Signal**: Disable（NSS 用软件，CSN 由普通 GPIO 控制）
+### 1. SPI2 配置
+
+- **Mode**: Full-Duplex Master ← 必须
+- **Hardware NSS Signal**: Disable（NSS 用软件，CSN 由普通 GPIO 控制）← 必须
 - **Parameter Settings**:
-  - Frame Format: Motorola
-  - Data Size: 8 Bits
-  - First Bit: **MSB First**
-  - Clock Polarity (CPOL): **Low**
-  - Clock Phase (CPHA): **1 Edge**（即 SPI 模式 0，nRF 强制要求）
-  - NSS Signal Type: Software
-  - Baud Rate Prescaler: **F103 选 4，F407 选 8**（理由见上表）
-- **GPIO**: PB13=SCK、PB14=MISO、PB15=MOSI（复用推挽）
+  - Frame Format: Motorola ← 必须
+  - Data Size: 8 Bits ← 必须
+  - First Bit: **MSB First** ← 必须
+  - Clock Polarity (CPOL): Low —— 模块强制，CubeMX 随意
+  - Clock Phase (CPHA): 1 Edge —— 模块强制，CubeMX 随意
+  - NSS Signal Type: Software —— 模块强制
+  - Baud Rate Prescaler: F103 选 4，F407 选 8 —— 模块强制，CubeMX 随意
+- **GPIO**: PB13=SCK、PB14=MISO、PB15=MOSI（复用推挽）← 必须
 
 ### 2. GPIO 配置（CE / CSN / IRQ）
 
@@ -153,14 +157,6 @@ Module_NRF24L01_Register("mode",      &mode,      NRF24L01_TYPE_UINT8);
 | `NRF24L01_TYPE_UINT32` | uint32_t | 4 |
 | `NRF24L01_TYPE_FLOAT` | float | 4 |
 | `NRF24L01_TYPE_DOUBLE` | double | 8 |
-
-### 手动触发发送
-
-一般不需要，线程自动定时发送。如需立即发送：
-
-```c
-Module_NRF24L01_TriggerTx();
-```
 
 ### 查询在线状态
 

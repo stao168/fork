@@ -43,8 +43,14 @@
 #endif
 
 /* ================= 硬件相关(按芯片给默认, 仍可被外部覆盖) =================
- * 引脚随芯片自动选择, 须与板级 CubeMX(.ioc) 配置一致(模块不配引脚, 只强制 SPI 分频);
+ * 引脚随芯片自动选择, 须与板级 CubeMX(.ioc) 配置一致(模块不配引脚, 只强制 SPI 参数);
  * 射频参数(信道/速率/地址)收发两端必须一致。 */
+
+/* 使用的 SPI 外设(默认 hspi2; 换其它 SPI 时覆盖此宏即可, 模块不再硬编码) */
+#ifndef NRF24L01_SPI
+#define NRF24L01_SPI hspi2
+#endif
+
 #if defined(STM32F407xx)
 /* ---- dji_c (STM32F407) ---- */
 #ifndef NRF24L01_CE_PORT
@@ -121,10 +127,10 @@ typedef enum
 /* ================= 对外接口 ================= */
 
 /**
- * @brief 初始化 nRF24L01 模块(SPI+GPIO+IRQ+配置寄存器+启动线程)
- * @return 0=成功, 其他=失败
+ * @brief 初始化 nRF24L01 模块(SPI参数强制 + 注册BSP设备/EXTI + 配置寄存器 + 起线程)
+ * @note  失败只打日志; 与其它模块一致, 不返回错误码
  */
-int Module_NRF24L01_Init(void);
+void Module_NRF24L01_Init(void);
 
 /**
  * @brief 注册一个数据项到收发列表
@@ -137,11 +143,6 @@ int Module_NRF24L01_Init(void);
  * @note  注册总字节数不能超过 32(nRF24L01 单包硬件上限)
  */
 int8_t Module_NRF24L01_Register(const char *name, void *data_ptr, NRF24L01_DataType_e type);
-
-/**
- * @brief 手动触发一次发送(一般不用, 线程自动定时发)
- */
-void Module_NRF24L01_TriggerTx(void);
 
 /**
  * @brief 获取模块在线状态(集成OFFLINE)

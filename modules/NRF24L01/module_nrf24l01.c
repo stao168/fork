@@ -20,6 +20,7 @@
 #include "nrf24l01_reg.h"
 #include "bsp_spi.h"
 #include "bsp_gpio.h"
+#include "bsp_def.h" /* APPS_STACK_SECTION */
 #include "module_offline.h"
 #include "spi.h"
 #include "tx_api.h"
@@ -31,6 +32,9 @@
 
 /* BSP_SPI_TransReceive 超时(tick, 1 tick = 1ms) */
 #define NRF24L01_SPI_TIMEOUT 100
+
+/* 等发送完成(TX_DS/MAX_RT)的最长轮询时间(ms); 正常约0.2ms, 重传耗尽约1.5ms */
+#define NRF24L01_TX_WAIT_MS 3
 
 /* ================= 类型大小表 ================= */
 static const uint8_t kTypeSize[NRF24L01_TYPE_COUNT] = {
@@ -52,51 +56,54 @@ typedef struct
     uint8_t  size;     /* 数据字节数 */
 } NRF_Cap_t;
 
-/* ================= 全局上下文 ================= */
+/* ================= 全局上下文(不含线程/栈) ================= */
 typedef struct
 {
     NRF_Cap_t       caps[NRF24L01_MAX_CAPS]; /* 注册列表 */
     SPI_Device     *spi_dev;                 /* SPI设备句柄 */
     Offline_Device *offline_dev;             /* OFFLINE设备句柄 */
-    TX_THREAD       thread;                  /* 线程控制块 */
-    TX_SEMAPHORE    irq_sem;                 /* IRQ信号量 */
-    uint8_t         thread_stack[NRF24L01_TASK_STACK_SIZE];
-    uint8_t         tx_payload[NRF24L01_PAYLOAD_MAX]; /* 发送缓冲区 */
-    uint8_t         rx_payload[NRF24L01_PAYLOAD_MAX]; /* 接收缓冲区 */
-    uint8_t         spi_tx[1 + NRF24L01_PAYLOAD_MAX]; /* SPI 收发共享缓冲(单线程串行, 省栈) */
-    uint8_t         spi_rx[1 + NRF24L01_PAYLOAD_MAX];
-    uint32_t        last_tx_tick;                     /* 上次发送时间 */
-    uint16_t        total_size;                       /* 注册数据总字节数 */
-    uint8_t         cap_count;                        /* 已注册数量 */
-    uint8_t         initialized;                      /* 初始化标志 */
+    uint8_t         spi_buf[1 + NRF24L01_PAYLOAD_MAX]; /* SPI帧收发共用: [0]=命令, [1..]=载荷 */
+    uint32_t        last_tx_tick;                      /* 上次发送时间 */
+    uint16_t        total_size;                        /* 注册数据总字节数 */
+    uint8_t         cap_count;                         /* 已注册数量 */
+    uint8_t         initialized;                       /* 初始化标志 */
 } NRF_Ctx_t;
 
 static NRF_Ctx_t g_nrf;
+
+/* 线程/信号量/栈: 按仓库惯例放文件作用域(栈需要 APPS_STACK_SECTION, 不能放进结构体) */
+static TX_THREAD                  g_nrf_thread;
+static TX_SEMAPHORE               g_nrf_irq_sem;
+APPS_STACK_SECTION static uint8_t g_nrf_stack[NRF24L01_TASK_STACK_SIZE];
 
 /* 通信地址(收发两端必须一致) */
 static const uint8_t kDefaultAddress[5] = {0x11, 0x22, 0x33, 0x44, 0x55};
 
 /* ================= 前向声明 ================= */
 static void nrf_thread_entry(ULONG arg);
-static void nrf_ce_high(void);
-static void nrf_ce_low(void);
 
-/* ================= 底层: CE 控制 ================= */
-static void nrf_ce_high(void) { HAL_GPIO_WritePin(NRF24L01_CE_PORT, NRF24L01_CE_PIN, GPIO_PIN_SET); }
-
-static void nrf_ce_low(void) { HAL_GPIO_WritePin(NRF24L01_CE_PORT, NRF24L01_CE_PIN, GPIO_PIN_RESET); }
+/* ================= 底层: CE 控制(宏实现, 省去简单函数的调用/栈开销) ================= */
+#define nrf_ce_high() HAL_GPIO_WritePin(NRF24L01_CE_PORT, NRF24L01_CE_PIN, GPIO_PIN_SET)
+#define nrf_ce_low()  HAL_GPIO_WritePin(NRF24L01_CE_PORT, NRF24L01_CE_PIN, GPIO_PIN_RESET)
 
 /* ================= 寄存器层: SPI 指令封装 ================= */
+
+/* 一次 SPI 传输: 收发共用 g_nrf.spi_buf(命令在[0], 数据在[1..]);
+ * 阻塞式 TransmitReceive 是"先读 tx[i] 发出、再写回 rx[i]", 收发同缓冲击安全 */
+static void nrf_spi(uint16_t len)
+{
+    BSP_SPI_TransReceive(g_nrf.spi_dev, g_nrf.spi_buf, g_nrf.spi_buf, len, NRF24L01_SPI_TIMEOUT);
+}
 
 /**
  * @brief 读寄存器(1字节)
  */
 static uint8_t nrf_read_reg(uint8_t reg)
 {
-    uint8_t tx[2] = {NRF24L01_R_REGISTER | reg, NRF24L01_NOP};
-    uint8_t rx[2] = {0};
-    BSP_SPI_TransReceive(g_nrf.spi_dev, tx, rx, 2, NRF24L01_SPI_TIMEOUT);
-    return rx[1];
+    g_nrf.spi_buf[0] = NRF24L01_R_REGISTER | reg;
+    g_nrf.spi_buf[1] = NRF24L01_NOP;
+    nrf_spi(2);
+    return g_nrf.spi_buf[1];
 }
 
 /**
@@ -104,9 +111,9 @@ static uint8_t nrf_read_reg(uint8_t reg)
  */
 static void nrf_write_reg(uint8_t reg, uint8_t value)
 {
-    uint8_t tx[2] = {NRF24L01_W_REGISTER | reg, value};
-    uint8_t rx[2];
-    BSP_SPI_TransReceive(g_nrf.spi_dev, tx, rx, 2, NRF24L01_SPI_TIMEOUT);
+    g_nrf.spi_buf[0] = NRF24L01_W_REGISTER | reg;
+    g_nrf.spi_buf[1] = value;
+    nrf_spi(2);
 }
 
 /**
@@ -132,40 +139,39 @@ static int8_t nrf_write_reg_checked(uint8_t reg, uint8_t value)
  */
 static void nrf_write_regs(uint8_t reg, const uint8_t *buf, uint8_t len)
 {
-    g_nrf.spi_tx[0] = NRF24L01_W_REGISTER | reg;
-    memcpy(g_nrf.spi_tx + 1, buf, len);
-    BSP_SPI_TransReceive(g_nrf.spi_dev, g_nrf.spi_tx, g_nrf.spi_rx, (uint16_t)(1 + len), NRF24L01_SPI_TIMEOUT);
+    g_nrf.spi_buf[0] = NRF24L01_W_REGISTER | reg;
+    memcpy(&g_nrf.spi_buf[1], buf, len);
+    nrf_spi((uint16_t)(1 + len));
 }
 
 /**
- * @brief 读 RX 有效载荷
+ * @brief 读 RX 有效载荷到 spi_buf[1..]
  */
-static void nrf_read_rx_payload(uint8_t *buf, uint8_t len)
+static void nrf_read_rx_payload(uint8_t len)
 {
-    g_nrf.spi_tx[0] = NRF24L01_R_RX_PAYLOAD;
-    memset(g_nrf.spi_tx + 1, NRF24L01_NOP, len);
-    BSP_SPI_TransReceive(g_nrf.spi_dev, g_nrf.spi_tx, g_nrf.spi_rx, (uint16_t)(1 + len), NRF24L01_SPI_TIMEOUT);
-    memcpy(buf, g_nrf.spi_rx + 1, len);
+    g_nrf.spi_buf[0] = NRF24L01_R_RX_PAYLOAD;
+    memset(&g_nrf.spi_buf[1], NRF24L01_NOP, len);
+    nrf_spi((uint16_t)(1 + len));
 }
 
+#if NRF24L01_TX_ENABLE
 /**
- * @brief 写 TX 有效载荷
- */
-static void nrf_write_tx_payload(const uint8_t *buf, uint8_t len)
+ * @brief 发送 spi_buf[1..] 中的TX载荷(调用方已组包)
+ */ 
+static void nrf_write_tx_payload(uint8_t len)
 {
-    g_nrf.spi_tx[0] = NRF24L01_W_TX_PAYLOAD;
-    memcpy(g_nrf.spi_tx + 1, buf, len);
-    BSP_SPI_TransReceive(g_nrf.spi_dev, g_nrf.spi_tx, g_nrf.spi_rx, (uint16_t)(1 + len), NRF24L01_SPI_TIMEOUT);
+    g_nrf.spi_buf[0] = NRF24L01_W_TX_PAYLOAD;
+    nrf_spi((uint16_t)(1 + len));
 }
+#endif /* NRF24L01_TX_ENABLE */
 
 /**
  * @brief 发送单字节指令(清FIFO等)
  */
 static void nrf_send_cmd(uint8_t cmd)
 {
-    uint8_t tx = cmd;
-    uint8_t rx;
-    BSP_SPI_TransReceive(g_nrf.spi_dev, &tx, &rx, 1, NRF24L01_SPI_TIMEOUT);
+    g_nrf.spi_buf[0] = cmd;
+    nrf_spi(1);
 }
 
 /**
@@ -173,9 +179,9 @@ static void nrf_send_cmd(uint8_t cmd)
  */
 static void nrf_activate_feature(void)
 {
-    uint8_t tx[2] = {NRF24L01_ACTIVATE, NRF24L01_ACTIVATE_DATA};
-    uint8_t rx[2];
-    BSP_SPI_TransReceive(g_nrf.spi_dev, tx, rx, 2, NRF24L01_SPI_TIMEOUT);
+    g_nrf.spi_buf[0] = NRF24L01_ACTIVATE;
+    g_nrf.spi_buf[1] = NRF24L01_ACTIVATE_DATA;
+    nrf_spi(2);
 }
 
 /**
@@ -183,10 +189,9 @@ static void nrf_activate_feature(void)
  */
 static uint8_t nrf_read_status(void)
 {
-    uint8_t tx = NRF24L01_NOP;
-    uint8_t rx;
-    BSP_SPI_TransReceive(g_nrf.spi_dev, &tx, &rx, 1, NRF24L01_SPI_TIMEOUT);
-    return rx;
+    g_nrf.spi_buf[0] = NRF24L01_NOP;
+    nrf_spi(1);
+    return g_nrf.spi_buf[0];
 }
 
 /* ================= 模式切换 ================= */
@@ -211,58 +216,78 @@ static void nrf_set_rx_mode(void)
     nrf_ce_high();
 }
 
-/* 收发两端均为小端 Cortex-M, 序列化/反序列化即按 size 逐字节按位拷贝(见调用处 memcpy) */
+/* ================= 发送(仅 NRF24L01_TX_ENABLE=1 时编译) ================= */
+#if NRF24L01_TX_ENABLE
 
-/* ================= 发送 ================= */
-
-void Module_NRF24L01_TriggerTx(void)
+/* 按注册表把各变量"当前值"拷入 spi_buf[1..](小端) */
+static void nrf_gather_tx(void)
 {
-    if (!g_nrf.initialized || g_nrf.cap_count == 0) return;
-
-    /* 遍历注册列表, 按注册尺寸拷入发送缓冲区(小端) */
     for (uint8_t i = 0; i < g_nrf.cap_count; i++)
     {
         NRF_Cap_t *c = &g_nrf.caps[i];
-        memcpy(&g_nrf.tx_payload[c->offset], c->data_ptr, c->size);
+        memcpy(&g_nrf.spi_buf[1 + c->offset], c->data_ptr, c->size);
     }
+}
 
-    /* 发送时序: CE低退出RX → 切TX → 写TX FIFO → CE高脉冲 → 切回RX */
-
-    /* 1. CE拉低退出RX进入Standby-I, 并切到TX模式 */
+/* 进入TX模式: CE低退出RX, 清PRIM_RX */
+static void nrf_enter_tx(void)
+{
     nrf_ce_low();
     nrf_config_update(0, NRF24L01_CONFIG_PRIM_RX);
+}
 
-    /* 2. 清TX FIFO并写载荷(必须在Standby/TX模式下写, RX模式下不生效) */
+/* 等发送结束: 轮询 STATUS 直到 TX_DS/MAX_RT(超时按失败算), 返回最终 STATUS */
+static uint8_t nrf_wait_tx_done(void)
+{
+    ULONG start = tx_time_get();
+
+    for (;;)
+    {
+        uint8_t status = nrf_read_status();
+        if (status & (NRF24L01_STATUS_TX_DS | NRF24L01_STATUS_MAX_RT)) return status;
+        if ((tx_time_get() - start) >= NRF24L01_TX_WAIT_MS) return NRF24L01_STATUS_MAX_RT;
+    }
+}
+
+/* 发送结果统计: TX_DS=收到ACK, MAX_RT=重传耗尽(对端没收到) */
+static void nrf_check_tx_result(uint8_t tx_status)
+{
+    static uint16_t s_tx_ok = 0, s_tx_fail = 0;
+
+    if (tx_status & NRF24L01_STATUS_MAX_RT)
+    {
+        s_tx_fail++;
+        /* 每50次失败打印一次, 避免刷屏 */
+        if ((s_tx_fail % 50) == 1) LOG_W("TX failed(no ACK): ok=%u fail=%u, check receiver/channel/address", s_tx_ok, s_tx_fail);
+        nrf_send_cmd(NRF24L01_FLUSH_TX);
+    }
+    else
+    {
+        s_tx_ok++;
+    }
+    nrf_write_reg(NRF24L01_STATUS, NRF24L01_STATUS_TX_DS | NRF24L01_STATUS_MAX_RT);
+}
+
+/* 组包+发送一次(仅线程内部调用) */
+static void nrf_trigger_tx(void)
+{
+    if (!g_nrf.initialized || g_nrf.cap_count == 0) return;
+
+    nrf_gather_tx(); /* 1. 读变量当前值 → spi_buf[1..] */
+
+    nrf_enter_tx(); /* 2. 切TX模式(CE低退出RX) */
     nrf_send_cmd(NRF24L01_FLUSH_TX);
-    nrf_write_tx_payload(g_nrf.tx_payload, (uint8_t)g_nrf.total_size);
+    nrf_write_tx_payload((uint8_t)g_nrf.total_size);
 
-    /* 3. CE高脉冲>10us触发发送
-     * ponytail: 固定 1ms 等待发送完成, 重传较多时可能不足; 更稳妥是等 TX_DS 中断。 */
-    nrf_ce_high();
-    tx_thread_sleep(1);
+    nrf_ce_high();                          /* 3. CE脉冲触发发送(ESB, 保持高直至完成) */
+    uint8_t tx_status = nrf_wait_tx_done(); /* 4. 等 TX_DS/MAX_RT, 不再死等1ms */
     nrf_ce_low();
 
-    /* 4. 检查发送结果: TX_DS=收到ACK, MAX_RT=重传耗尽(对端没收到) */
-    {
-        uint8_t         tx_status = nrf_read_status();
-        static uint16_t s_tx_ok = 0, s_tx_fail = 0;
-        if (tx_status & NRF24L01_STATUS_MAX_RT)
-        {
-            s_tx_fail++;
-            /* 每50次失败打印一次, 避免刷屏 */
-            if ((s_tx_fail % 50) == 1) LOG_W("TX failed(no ACK): ok=%u fail=%u, check receiver/channel/address", s_tx_ok, s_tx_fail);
-            nrf_send_cmd(NRF24L01_FLUSH_TX);
-        }
-        else if (tx_status & NRF24L01_STATUS_TX_DS)
-        {
-            s_tx_ok++;
-        }
-        nrf_write_reg(NRF24L01_STATUS, NRF24L01_STATUS_TX_DS | NRF24L01_STATUS_MAX_RT);
-    }
-
-    /* 5. 切回RX模式常驻接收 */
-    nrf_set_rx_mode();
+    nrf_check_tx_result(tx_status); /* 5. 统计+清标志 */
+    nrf_set_rx_mode();              /* 6. 切回RX常驻接收 */
 }
+
+#endif /* NRF24L01_TX_ENABLE */
 
 /* ================= 接收处理(线程中调用) ================= */
 
@@ -277,8 +302,8 @@ static void nrf_handle_rx(void)
         uint8_t plen = nrf_read_reg(NRF24L01_R_RX_PL_WID);
         if (plen > 0 && plen <= NRF24L01_PAYLOAD_MAX)
         {
-            /* 读载荷 */
-            nrf_read_rx_payload(g_nrf.rx_payload, plen);
+            /* 读载荷到 spi_buf[1..] */
+            nrf_read_rx_payload(plen);
 
             /* 长度匹配才解码 */
             if (plen == g_nrf.total_size)
@@ -286,7 +311,7 @@ static void nrf_handle_rx(void)
                 for (uint8_t i = 0; i < g_nrf.cap_count; i++)
                 {
                     NRF_Cap_t *c = &g_nrf.caps[i];
-                    memcpy(c->data_ptr, &g_nrf.rx_payload[c->offset], c->size);
+                    memcpy(c->data_ptr, &g_nrf.spi_buf[1 + c->offset], c->size);
                 }
                 /* OFFLINE 心跳更新 */
                 if (g_nrf.offline_dev)
@@ -311,7 +336,7 @@ static void nrf_thread_entry(ULONG arg)
     while (1)
     {
         /* 等待IRQ信号量, 超时=发送间隔; 无论是否超时都检查接收(轮询兜底, 不依赖IRQ) */
-        tx_semaphore_get(&g_nrf.irq_sem, NRF24L01_TX_INTERVAL_MS);
+        tx_semaphore_get(&g_nrf_irq_sem, NRF24L01_TX_INTERVAL_MS);
         nrf_handle_rx();
 
 #if NRF24L01_TX_ENABLE
@@ -320,7 +345,7 @@ static void nrf_thread_entry(ULONG arg)
         if ((now - g_nrf.last_tx_tick) >= NRF24L01_TX_INTERVAL_MS)
         {
             g_nrf.last_tx_tick = now;
-            Module_NRF24L01_TriggerTx();
+            nrf_trigger_tx();
         }
 #endif
     }
@@ -333,14 +358,14 @@ static void nrf_irq_callback(void)
     /* 信号量未创建前不响应, 防止初始化阶段IRQ毛刺导致异常 */
     if (!g_nrf.initialized) return;
     /* nRF24L01 IRQ低电平有效, 置信号量唤醒线程 */
-    tx_semaphore_put(&g_nrf.irq_sem);
+    tx_semaphore_put(&g_nrf_irq_sem);
 }
 
 /* ================= 初始化 ================= */
 
-int Module_NRF24L01_Init(void)
+void Module_NRF24L01_Init(void)
 {
-    if (g_nrf.initialized) return 0;
+    if (g_nrf.initialized) return;
 
     /* 静态 g_nrf 已在 .bss 清零, 无需 memset(且 memset 会清掉已注册项) */
 
@@ -349,19 +374,19 @@ int Module_NRF24L01_Init(void)
     /* ---- 1. SPI 参数强制 + BSP SPI 设备注册 ----
      * 强制模式0(CPOL=0/CPHA=0, nRF24L01要求)并按芯片设分频(SCK ≤10MHz);
      * 同 REMOTE/WT606 强制 UART 波特率: HAL_SPI_Init 会经 MSP 一并配好 SPI 引脚 */
-    hspi2.Init.CLKPolarity       = SPI_POLARITY_LOW;
-    hspi2.Init.CLKPhase          = SPI_PHASE_1EDGE;
-    hspi2.Init.NSS               = SPI_NSS_SOFT;
-    hspi2.Init.BaudRatePrescaler = NRF24L01_SPI_PRESCALER;
-    if (HAL_SPI_Init(&hspi2) != HAL_OK)
+    NRF24L01_SPI.Init.CLKPolarity       = SPI_POLARITY_LOW;
+    NRF24L01_SPI.Init.CLKPhase          = SPI_PHASE_1EDGE;
+    NRF24L01_SPI.Init.NSS               = SPI_NSS_SOFT;
+    NRF24L01_SPI.Init.BaudRatePrescaler = NRF24L01_SPI_PRESCALER;
+    if (HAL_SPI_Init(&NRF24L01_SPI) != HAL_OK)
     {
         LOG_E("SPI re-init failed");
-        return -1;
+        return;
     }
 
     /* CSN 由 BSP 管理 */
     SPI_Device_Init_Config spi_cfg = {0};
-    spi_cfg.hspi    = &hspi2;
+    spi_cfg.hspi    = &NRF24L01_SPI;
     spi_cfg.cs_port = NRF24L01_CSN_PORT;
     spi_cfg.cs_pin  = NRF24L01_CSN_PIN;
     spi_cfg.tx_mode = SPI_MODE_BLOCKING;
@@ -370,7 +395,7 @@ int Module_NRF24L01_Init(void)
     if (g_nrf.spi_dev == NULL)
     {
         LOG_E("BSP SPI device init failed");
-        return -2;
+        return;
     }
 
     /* ---- 2. 注册 EXTI 回调(避免与其他模块的 HAL_GPIO_EXTI_Callback 冲突; 引脚/中断由板级配置) ---- */
@@ -435,20 +460,19 @@ int Module_NRF24L01_Init(void)
     g_nrf.offline_dev                 = Module_Offline_register(&offline_cfg);
 
     /* ---- 5. 创建IRQ信号量和线程 ---- */
-    tx_semaphore_create(&g_nrf.irq_sem, "nrf_irq", 0);
+    tx_semaphore_create(&g_nrf_irq_sem, "nrf_irq", 0);
 
-    UINT ret = tx_thread_create(&g_nrf.thread, "nrf24l01", nrf_thread_entry, 0, g_nrf.thread_stack, NRF24L01_TASK_STACK_SIZE, NRF24L01_TASK_PRIORITY,
+    UINT ret = tx_thread_create(&g_nrf_thread, "nrf24l01", nrf_thread_entry, 0, g_nrf_stack, NRF24L01_TASK_STACK_SIZE, NRF24L01_TASK_PRIORITY,
                                 NRF24L01_TASK_PRIORITY, TX_NO_TIME_SLICE, TX_AUTO_START);
     if (ret != TX_SUCCESS)
     {
         LOG_E("Thread create failed: %d", ret);
-        return -3;
+        return;
     }
 
     g_nrf.initialized = 1;
     LOG_I("NRF24L01 initialized: ch=%d rate=%dMbps power=%ddBm", NRF24L01_RF_CHANNEL, NRF24L01_RF_DATARATE,
           NRF24L01_RF_POWER == 0 ? 0 : -6 * NRF24L01_RF_POWER);
-    return 0;
 }
 
 /* ================= 注册 ================= */
