@@ -1,24 +1,38 @@
 /*
  * @file        robot_control.c
- * @brief       test 兵种 — 新模块接入测试骨架
+ * @brief       test 兵种 — NRF24L01 模块测试用例
  *
  * ────────────────────────────────────────────────────────────────
- *  新模块开发工作流:
- *    ① 编写新模块 (modules/<MOD>/), 加入三步注册
- *    ② 在 config.cmake 切 ROBOT=test, 在本文件 主循环区 写临时测试代码
- *       (调用/注册新模块 API, 观察日志/串口/波形等验证)
- *    ③ 测试成功 → 删除本文件主循环区测试代码 (恢复空循环)
- *    ④ 把已验证的用法整理进 新模块 .h 的使用示例注释
- *    ⑤ 提交新模块 (test 兵种作为骨架保留, 不再依赖主循环测试)
+ *  前置: 先在板级 CubeMX 里配好 SPI2 与 CE/CSN/IRQ(EXTI), 见 module_nrf24l01.h
+ *
+ *  测试原理:
+ *    能力注册式框架要求收发两端注册顺序完全一致:
+ *    A 板的第 N 个变量 ↔ B 板的第 N 个变量。
+ *    两块板刷相同固件、注册相同变量即可双向通信。
+ *
+ *  验证方法:
+ *    - 两块板各接一个 nRF24L01, 刷相同固件
+ *    - 串口日志观察变量是否同步(两边都在自增且互相覆盖)
+ *    - 拔掉一块板电源, 另一块应在超时后由 ONLINE 变 OFFLINE
+ *    - 收发角色由 robot.cmake 里的 NRF24L01_TX_ENABLE / NRF24L01_RX_ENABLE 选定;
+ *      默认 TX=0/RX=1(只收), 双向就都设为1(半双工, 建议一主一从避免空中碰撞)
  * ────────────────────────────────────────────────────────────────
  */
 #include "robot_control.h"
+#include "module_nrf24l01.h"
 #include "tx_api.h"
 #include "bsp_def.h"
 
 #define LOG_TAG "test_robot"
 #define LOG_LVL LOG_LVL_INFO
 #include "ulog_def.h"
+
+/* ========== 测试变量(两块板注册相同变量, 顺序一致) ========== */
+static float    s_val_float  = 0.0f; /* 浮点计数器 */
+static int16_t  s_val_int16  = 0;    /* 16位计数器 */
+static uint8_t  s_val_uint8  = 0;    /* 8位计数器  */
+static uint32_t s_val_uint32 = 0;    /* 32位计数器 */
+static uint32_t s_loop_count = 0;    /* 循环计数   */
 
 /* ========== 主循环任务 ========== */
 static TX_THREAD                  g_test_loop_thread;
@@ -28,13 +42,32 @@ static void test_loop_task_entry(ULONG arg)
 {
     (void)arg;
 
+    /* 注册测试变量(收发两端顺序必须完全一致) */
+    Module_NRF24L01_Register("val_float",  &s_val_float,  NRF24L01_TYPE_FLOAT);
+    Module_NRF24L01_Register("val_int16",  &s_val_int16,  NRF24L01_TYPE_INT16);
+    Module_NRF24L01_Register("val_uint8",  &s_val_uint8,  NRF24L01_TYPE_UINT8);
+    Module_NRF24L01_Register("val_uint32", &s_val_uint32, NRF24L01_TYPE_UINT32);
+    LOG_I("NRF24L01 test: 4 vars registered (11 bytes)");
+
     while (1)
     {
-        /* ===== 临时测试区 (工作流②): 测试新模块 API, 成功后删除 ===== */
-        /* 示例: 调用/注册待测模块 API, 周期性打印或触发验证          */
-        /* ============================================================ */
+        s_loop_count++;
+#if NRF24L01_TX_ENABLE
+        /* 本板是发送角色时自增本地变量(会被自动发送到对端对应变量) */
+        s_val_float  += 0.1f;
+        s_val_int16  += 1;
+        s_val_uint8  += 1;
+        s_val_uint32 += 10;
+#endif
+        /* 每 500ms 打印一次本地值 + 在线状态 */
+        if ((s_loop_count % 50) == 0)
+        {
+            uint8_t status = Module_NRF24L01_GetStatus();
+            LOG_I("val: f=%.1f i16=%d u8=%u u32=%lu | %s", s_val_float, s_val_int16, s_val_uint8,
+                  (unsigned long)s_val_uint32, status == 0 ? "ONLINE" : "OFFLINE");
+        }
 
-        tx_thread_sleep(10);
+        tx_thread_sleep(10); /* 100Hz 循环 */
     }
 }
 

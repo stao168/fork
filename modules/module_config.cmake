@@ -98,7 +98,8 @@ set(VOFA_TASK_PRIORITY     11)           # 任务优先级
 set(NRF24L01_TASK_STACK_SIZE    1024)  # 任务栈大小
 set(NRF24L01_TASK_PRIORITY      1)     # 任务优先级
 set(NRF24L01_TX_INTERVAL_MS     10)    # 发送周期, 默认100Hz
-set(NRF24L01_TX_ENABLE          1)     # 是否自动发送: 1=发送端, 0=纯接收端(主从模式避免冲突)
+set(NRF24L01_TX_ENABLE          0)     # 1=注册发送线程(本板做发送端)
+set(NRF24L01_RX_ENABLE          0)     # 1=注册接收线程(本板做接收端); 两者都为1则双向
 set(NRF24L01_MAX_CAPS           16)    # 最多注册数据项数
 set(NRF24L01_OFFLINE_TIMEOUT_MS 100)   # OFFLINE心跳超时(ms)
 set(NRF24L01_RF_CHANNEL         2)     # 射频通道: 2400+N MHz (收发两端必须一致)

@@ -9,8 +9,8 @@ nRF24L01 2.4GHz 无线模块驱动，能力注册式收发框架，基于 HAL + 
 - **Enhanced ShockBurst**：硬件自动 ACK + 自动重传 + CRC，丢包率低
 - **8 种数据类型**：int8/16/32、uint8/16/32、float、double，按尺寸小端拷贝
 - **IRQ 中断接收**：收到数据触发 EXTI 中断，信号量唤醒线程，低延迟
-- **OFFLINE 集成**：收到数据自动喂心跳，超时触发离线报警
-- **单线程架构**：一个线程同时处理定时发送和 IRQ 唤醒接收
+- **OFFLINE 集成**：收到数据 / 收到 ACK 自动喂心跳，超时触发离线报警
+- **收发双线程**：发送线程只管定时发送、接收线程只管 IRQ 接收，用 `TX_ENABLE`/`RX_ENABLE` 选角色，不用哪边就不编译（连线程栈都不占）
 - **跨芯片**：F103/F407 同一套源码，选对 Build 任务即可，射频参数两端一致时可互通
 
 ---
@@ -21,16 +21,18 @@ nRF24L01 2.4GHz 无线模块驱动，能力注册式收发框架，基于 HAL + 
 2. **挂进构建（本框架三处，一般已预置）**：
    - `modules/CMakeLists.txt`：`if(MODULE_NRF24L01)` 段加入 `.c` 源文件与 include 目录；
    - `modules/module_init.c`：`#include "module_nrf24l01.h"` 并在 `MODULE_Init()` 里 `#if MODULE_NRF24L01  Module_NRF24L01_Init(); #endif`；
-   - `apps/<robot>/robot.cmake`：把 NRF24L01 加入模块列表并设置射频参数/主从（见下）。
+   - `apps/<robot>/robot.cmake`：把 NRF24L01 加入模块列表并设置射频参数/收发角色（见下）。
    ```cmake
    set(MODULES_SINGLE   OFFLINE NRF24L01)
    set(NRF24L01_RF_CHANNEL  2)   # 2402MHz，两端一致
    set(NRF24L01_RF_DATARATE 2)   # 2Mbps，两端一致
-   set(NRF24L01_TX_ENABLE  1)    # 1=发送端, 0=纯接收端，两块板分别编译
+   set(NRF24L01_TX_ENABLE  1)    # 1=注册发送线程
+   set(NRF24L01_RX_ENABLE  0)    # 1=注册接收线程；两个都 1 即双向
    ```
+   > `TX_ENABLE`/`RX_ENABLE` **默认都是 0**，即不注册任何线程（只配寄存器、不传数据）。必须明确选定角色。
 3. **新芯片适配（F1/F4 已内置，可跳过）**：换其它芯片时，在 `module_nrf24l01.h` 硬件段照 F1/F4 加一个 `#if defined(STM32xxx)` 分支（CE/CSN/IRQ 三个引脚宏 + SPI 分频宏），并在 CubeMX 里按该芯片配好 SPI2 与引脚。
 4. **应用层注册变量**：初始化后调用 `Module_NRF24L01_Register(...)`（见「使用方法」），收发两端注册顺序/类型/个数必须一致。
-5. **定主从、选板编译**：`NRF24L01_TX_ENABLE` 一块设 1、一块设 0，分别编译烧录。VS Code 里 `Ctrl+Shift+P → Tasks: Run Task`，选 **Build f103_c8** 或 **Build dji_c**——芯片宏（`STM32F103xB`/`STM32F407xx`）由板级 CMake 自动传入，**源码不用切来切去**。
+5. **定角色、选板编译**：`TX_ENABLE`/`RX_ENABLE` 按角色设 1（一块发、一块收就各自设一个），分别编译烧录。VS Code 里 `Ctrl+Shift+P → Tasks: Run Task`，选 **Build f103_c8** 或 **Build dji_c**——芯片宏（`STM32F103xB`/`STM32F407xx`）由板级 CMake 自动传入，**源码不用切来切去**。
 6. **上电自检**：看开机日志有没有 `write verify failed` / `FEATURE=0`（见「上电自检与故障排查」）。
 
 ---
@@ -177,7 +179,8 @@ if (Module_NRF24L01_GetStatus() == 0) {
 | `NRF24L01_TASK_STACK_SIZE` | 1024 | 线程栈大小 |
 | `NRF24L01_TASK_PRIORITY` | 1 | 线程优先级（别太低，否则会被打印线程抢占导致收发卡顿） |
 | `NRF24L01_TX_INTERVAL_MS` | 10 | 发送间隔（ms），默认 100Hz |
-| `NRF24L01_TX_ENABLE` | 1 | 1=发送端，0=纯接收端（主从一发一收） |
+| `NRF24L01_TX_ENABLE` | 0 | 1=注册发送线程（本板做发送端） |
+| `NRF24L01_RX_ENABLE` | 0 | 1=注册接收线程（本板做接收端）；两个都 1 即双向 |
 | `NRF24L01_MAX_CAPS` | 16 | 最多注册数据项数 |
 | `NRF24L01_OFFLINE_TIMEOUT_MS` | 100 | OFFLINE 心跳超时（ms） |
 | `NRF24L01_RF_CHANNEL` | 2 | 射频通道：2400+N MHz |
@@ -223,7 +226,7 @@ if (Module_NRF24L01_GetStatus() == 0) {
 **协议一致性（两端必须相同，否则收不到）**
 5. 射频参数一致：信道、5 字节地址、空中速率、CRC、EN_AA、地址宽度；别只给一端烧旧固件。
 6. 两端 **Register 顺序/类型/个数完全一致**，否则解码错位；单包载荷 **≤32 字节**，超了注册返回 -1。
-7. **一发一收**：`NRF24L01_TX_ENABLE` 一块 1 一块 0，分别编译烧录；不要两块同时发（半双工，会空中冲突）。
+7. **一发一收**：一块板只开 `TX_ENABLE`、另一块只开 `RX_ENABLE`，分别编译烧录；不要两块同时发（半双工，会空中冲突）。两个都开时模块内部用互斥锁串行化收发，不会互相踩 SPI，但两端同时发仍会碰撞。
 
 **软件**
 8. nRF 线程优先级别太低（曾因与打印线程同级被抢占，出现"通一会断"，默认已设为 1）。

@@ -4,9 +4,10 @@
  *
  *  使用流程:
  *    0. 先在 CubeMX 里配好 SPI2 与 CE/CSN/IRQ 引脚(见下方"硬件"), 生成代码
- *    1. Module_NRF24L01_Init()           初始化(配置寄存器 + 起线程)
- *    2. Module_NRF24L01_Register("名字", &var, TYPE)  注册变量
- *    3. 之后变量自动收发, 收到数据自动写回
+ *    1. 在 robot.cmake 里选定角色(见下方 NRF24L01_TX_ENABLE / NRF24L01_RX_ENABLE)
+ *    2. Module_NRF24L01_Init()           初始化(配置寄存器 + 按角色起线程)
+ *    3. Module_NRF24L01_Register("名字", &var, TYPE)  注册变量
+ *    4. 之后变量自动收发, 收到数据自动写回
  *
  *  硬件(需自行在 CubeMX 配置, 与下方宏保持一致):
  *    SPI2: PB13=SCK PB14=MISO PB15=MOSI (模式0, ≤10MHz)
@@ -33,8 +34,13 @@
 #define NRF24L01_TX_INTERVAL_MS 10 /* 自动发送间隔(ms), 默认100Hz */
 #endif
 #ifndef NRF24L01_TX_ENABLE
-#define NRF24L01_TX_ENABLE 1 /* 是否自动发送: 1=发送端, 0=纯接收端 */
+#define NRF24L01_TX_ENABLE 0 /* 1=注册发送线程(本板做发送端) */
 #endif
+#ifndef NRF24L01_RX_ENABLE
+#define NRF24L01_RX_ENABLE 0 /* 1=注册接收线程(本板做接收端) */
+#endif
+/* 两个都为1: 本板收发双向; 都为0: 只配置芯片不传输数据。
+ * nRF24L01 是半双工, 双向时模块内部用互斥锁串行化, 且两端同时发容易空中碰撞。 */
 #ifndef NRF24L01_MAX_CAPS
 #define NRF24L01_MAX_CAPS 16 /* 最多注册多少个数据项 */
 #endif
