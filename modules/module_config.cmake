@@ -93,8 +93,8 @@ set(VOFA_TASK_PRIORITY     11)           # 任务优先级
 # NRF24L01 默认参数(2.4GHz无线模块; 默认不启用)
 # 注: NRF24L01 默认不在 MODULES_* 列表中(默认不启用)。启用需在 robot.cmake:
 #     1) 将 NRF24L01 加入对应 MODULES_XXX
-#     2) 确认板级 SPI2 已配置(f103_c8: PB13=SCK PB14=MISO PB15=MOSI)
-# 硬件(f103_c8测试板): SPI2, CE=PB0, CSN=PB1, IRQ=PA0
+#     2) 按角色设置 NRF24L01_TX_ENABLE / NRF24L01_RX_ENABLE(二者必须且只能选一个)
+# SPI 与 CE/CSN/IRQ 引脚由各工程自己在 CubeMX 里配好(见 module_nrf24l01.h)
 set(NRF24L01_TASK_STACK_SIZE    1024)  # 任务栈大小
 set(NRF24L01_TASK_PRIORITY      10)    # 任务优先级
 set(NRF24L01_TX_INTERVAL_MS     10)    # 发送周期, 默认100Hz
