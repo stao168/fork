@@ -11,6 +11,7 @@
 #include "dt7.h"
 #include "vt02.h"
 #include "vt03.h"
+#include "ps2.h"
 
 #define LOG_TAG "module_remote"
 #define LOG_LVL LOG_LVL_INFO
@@ -39,6 +40,10 @@ static void remote_ctrl_task_entry(ULONG arg)
         remote_sbus_decode(&g_remote_data, g_rc_offline);
 #elif (REMOTE_SOURCE == 2)
         remote_dt7_decode(&g_remote_data, g_rc_offline);
+#elif (REMOTE_SOURCE == 3)
+        /* PS2 是主机主动轮询, 没有"数据到来"事件, 必须自己控制周期, 否则 100% 占 CPU */
+        remote_ps2_decode(&g_remote_data, g_rc_offline);
+        tx_thread_sleep(REMOTE_PS2_POLL_INTERVAL_MS);
 #else
         tx_thread_sleep(100);
 #endif
@@ -81,6 +86,12 @@ void Module_Remote_init(void)
     if (remote_dt7_init(&g_rc_offline) != TX_SUCCESS)
     {
         LOG_E("DT7 init failed");
+        return;
+    }
+#elif (REMOTE_SOURCE == 3)
+    if (remote_ps2_init(&g_rc_offline) != 0)
+    {
+        LOG_E("PS2 init failed");
         return;
     }
 #endif
@@ -156,6 +167,12 @@ vt03_custom_t *Module_Remote_get_vt03_custom(void)
 {
     if (!g_initialized) return NULL;
     return &g_remote_data.vt03;
+}
+
+ps2_custom_t *Module_Remote_get_ps2_custom(void)
+{
+    if (!g_initialized) return NULL;
+    return &g_remote_data.ps2;
 }
 
 uint8_t Module_Remote_get_offline_status(void)

@@ -19,13 +19,39 @@
 #endif
 
 #ifndef REMOTE_SOURCE
-#define REMOTE_SOURCE 1 /* 遥控器选择: 0=none, 1=sbus, 2=dt7 */
+#define REMOTE_SOURCE 1 /* 遥控器选择: 0=none, 1=sbus, 2=dt7, 3=ps2 */
 #endif
 #ifndef REMOTE_VT_SOURCE
 #define REMOTE_VT_SOURCE 0 /* 图传选择:   0=none, 1=vt02, 2=vt03 */
 #endif
 #ifndef REMOTE_DEAD_ZONE
 #define REMOTE_DEAD_ZONE 10 /* 遥控器死区范围 */
+#endif
+
+/* PS2 手柄 (REMOTE_SOURCE == 3) 专用; SPI 句柄与 CS 引脚由兵种 robot.cmake 覆盖 */
+#ifndef REMOTE_PS2_SPI
+#define REMOTE_PS2_SPI hspi2 /* 独立接 PS2 接收器的 SPI */
+#endif
+#ifndef REMOTE_PS2_CS_PORT
+#define REMOTE_PS2_CS_PORT GPIOA /* CS/SEL, 整帧 9 字节保持低 */
+#endif
+#ifndef REMOTE_PS2_CS_PIN
+#define REMOTE_PS2_CS_PIN GPIO_PIN_4
+#endif
+#ifndef REMOTE_PS2_SPI_PRESCALER
+#define REMOTE_PS2_SPI_PRESCALER SPI_BAUDRATEPRESCALER_256 /* SCK ≤250kHz */
+#endif
+#ifndef REMOTE_PS2_POLL_INTERVAL_MS
+#define REMOTE_PS2_POLL_INTERVAL_MS 10 /* 轮询周期(ms), 100Hz */
+#endif
+#ifndef REMOTE_PS2_OFFLINE_TIMEOUT_MS
+#define REMOTE_PS2_OFFLINE_TIMEOUT_MS 150 /* OFFLINE 心跳超时(ms) */
+#endif
+#ifndef REMOTE_PS2_STICK_DEADZONE_RAW
+#define REMOTE_PS2_STICK_DEADZONE_RAW 8 /* 摇杆原始量纲(0~255)死区 */
+#endif
+#ifndef REMOTE_PS2_INVERT_Y
+#define REMOTE_PS2_INVERT_Y 0 /* 实测"上推"为负时置 1 取反 Y 轴 */
 #endif
 
 /* 任务配置 */
@@ -137,6 +163,19 @@ typedef struct
 } vt03_custom_t;
 
 /**
+ * @brief PS2 手柄自定义数据
+ * @note  buttons 已归一化成 1=按下(原始是低有效);
+ *        bit(n-1) 对应: 1 SELECT / 2 L3 / 3 R3 / 4 START / 5 ↑ / 6 → / 7 ↓ / 8 ← /
+ *                        9 L2 / 10 R2 / 11 L1 / 12 R1 / 13 △ / 14 ○ / 15 × / 16 □
+ */
+typedef struct
+{
+    uint16_t buttons;        /* 16 个按键位图, 1=按下 */
+    uint8_t  lx, ly, rx, ry; /* 原始摇杆 0~255 */
+    uint8_t  mode;           /* 0x41=数字, 0x73=模拟, 0x79=模拟+振动 */
+} ps2_custom_t;
+
+/**
  * @brief 统一遥控数据
  */
 typedef struct
@@ -145,6 +184,7 @@ typedef struct
     int16_t       channels[16]; /* ch[0..3]: 摇杆通道, ch[4..15]: 扩展通道 (SBUS) */
     dt7_custom_t  dt7;          /* DT7 自定义数据 */
     vt03_custom_t vt03;         /* VT03 自定义数据 */
+    ps2_custom_t  ps2;          /* PS2 自定义数据 */
 
     /* 键鼠数据 */
     mouse_state_t    mouse;    /* 鼠标状态 */
@@ -192,6 +232,12 @@ dt7_custom_t *Module_Remote_get_dt7_custom(void);
  * @return VT03 自定义数据指针, 未初始化返回 NULL
  */
 vt03_custom_t *Module_Remote_get_vt03_custom(void);
+
+/**
+ * @brief 获取 PS2 自定义数据指针
+ * @return PS2 自定义数据指针, 未初始化返回 NULL
+ */
+ps2_custom_t *Module_Remote_get_ps2_custom(void);
 
 /**
  * @brief 获取遥控器与图传联合离线状态

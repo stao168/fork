@@ -32,6 +32,7 @@ if(MODULE_REMOTE)
         REMOTE/DT7/dt7.c
         REMOTE/VT02/vt02.c
         REMOTE/VT03/vt03.c
+        REMOTE/PS2/ps2.c
     )
     list(APPEND _module_includes
         ${CMAKE_CURRENT_SOURCE_DIR}/REMOTE
@@ -39,6 +40,7 @@ if(MODULE_REMOTE)
         ${CMAKE_CURRENT_SOURCE_DIR}/REMOTE/DT7
         ${CMAKE_CURRENT_SOURCE_DIR}/REMOTE/VT02
         ${CMAKE_CURRENT_SOURCE_DIR}/REMOTE/VT03
+        ${CMAKE_CURRENT_SOURCE_DIR}/REMOTE/PS2
     )
 endif()
 
