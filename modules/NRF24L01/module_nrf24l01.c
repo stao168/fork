@@ -41,10 +41,10 @@
 #define NRF24L01_SPI_TIMEOUT 100
 
 /* 等发送完成(TX_DS/MAX_RT)的最长轮询时间(ms); 正常约0.2ms, 重传耗尽约1.5ms */
-#define NRF24L01_TX_WAIT_MS 3
+#define NRF24L01_TX_WAIT_MS  3
 
 /* 接收线程等 IRQ 的兜底超时(ms): 正常由 IRQ 唤醒, 只用于防漏边沿 */
-#define NRF24L01_RX_POLL_MS 50
+#define NRF24L01_RX_POLL_MS  50
 
 /* ================= 类型大小表 ================= */
 static const uint8_t kTypeSize[NRF24L01_TYPE_COUNT] = {
@@ -90,7 +90,7 @@ BUFFER_SECTION static uint8_t g_nrf_rx[1 + NRF24L01_PAYLOAD_MAX];
 static TX_THREAD                  g_nrf_thread;
 APPS_STACK_SECTION static uint8_t g_nrf_stack[NRF24L01_TASK_STACK_SIZE];
 #if NRF24L01_RX_ENABLE
-static TX_SEMAPHORE               g_nrf_irq_sem; /* IRQ → 接收线程 */
+static TX_SEMAPHORE g_nrf_irq_sem; /* IRQ → 接收线程 */
 #endif
 
 /* 通信地址(收发两端必须一致; 可在 robot.cmake 里用 NRF24L01_ADDR 覆盖) */
@@ -103,7 +103,7 @@ static const uint8_t kAddress[5] = {NRF24L01_ADDR};
 /* ================= 寄存器层: SPI 指令封装 ================= */
 
 /* 一次传输: 发 g_nrf_tx, 收 g_nrf_rx; 宏实现, 不再多一层函数调用 */
-#define nrf_spi(len) BSP_SPI_TransReceive(g_nrf.spi_dev, g_nrf_tx, g_nrf_rx, (uint16_t)(len), NRF24L01_SPI_TIMEOUT)
+#define nrf_spi(len)  BSP_SPI_TransReceive(g_nrf.spi_dev, g_nrf_tx, g_nrf_rx, (uint16_t)(len), NRF24L01_SPI_TIMEOUT)
 
 /* 发命令帧: [0]=命令, [1..]=datalen 字节数据(数据由调用方先填好) */
 static inline void nrf_cmd(uint8_t cmd, uint8_t datalen)
@@ -173,19 +173,13 @@ static inline void nrf_read_rx_payload(uint8_t len)
 /**
  * @brief 发送 g_nrf_tx[1..] 中的TX载荷(调用方已组包)
  */
-static inline void nrf_write_tx_payload(uint8_t len)
-{
-    nrf_cmd(NRF24L01_W_TX_PAYLOAD, len);
-}
+static inline void nrf_write_tx_payload(uint8_t len) { nrf_cmd(NRF24L01_W_TX_PAYLOAD, len); }
 #endif /* NRF24L01_TX_ENABLE */
 
 /**
  * @brief 发送单字节命令(清FIFO等)
  */
-static inline void nrf_send_cmd(uint8_t cmd)
-{
-    nrf_cmd(cmd, 0);
-}
+static inline void nrf_send_cmd(uint8_t cmd) { nrf_cmd(cmd, 0); }
 
 /**
  * @brief 激活FEATURE寄存器(nRF24L01+必需, 否则DPL/ACK载荷等功能不可用)
@@ -424,12 +418,12 @@ void Module_NRF24L01_Init(void)
 
     /* CSN 由 BSP 管理 */
     SPI_Device_Init_Config spi_cfg = {0};
-    spi_cfg.hspi    = &NRF24L01_SPI;
-    spi_cfg.cs_port = NRF24L01_CSN_PORT;
-    spi_cfg.cs_pin  = NRF24L01_CSN_PIN;
-    spi_cfg.tx_mode = SPI_MODE_DMA;
-    spi_cfg.rx_mode = SPI_MODE_DMA;
-    g_nrf.spi_dev   = BSP_SPI_Device_Init(&spi_cfg);
+    spi_cfg.hspi                   = &NRF24L01_SPI;
+    spi_cfg.cs_port                = NRF24L01_CSN_PORT;
+    spi_cfg.cs_pin                 = NRF24L01_CSN_PIN;
+    spi_cfg.tx_mode                = SPI_MODE_DMA;
+    spi_cfg.rx_mode                = SPI_MODE_DMA;
+    g_nrf.spi_dev                  = BSP_SPI_Device_Init(&spi_cfg);
     if (g_nrf.spi_dev == NULL)
     {
         LOG_E("BSP SPI device init failed");
@@ -533,9 +527,9 @@ int8_t Module_NRF24L01_Register(const char *name, void *data_ptr, NRF24L01_DataT
     }
 
     NRF_Cap_t *c = &g_nrf.caps[g_nrf.cap_count];
-    c->data_ptr = data_ptr;
-    c->size     = sz;
-    c->offset   = g_nrf.total_size;
+    c->data_ptr  = data_ptr;
+    c->size      = sz;
+    c->offset    = g_nrf.total_size;
 
     g_nrf.total_size += sz;
     LOG_I("Registered '%s' type=%d size=%d offset=%d (total=%d)", name ? name : "?", type, sz, c->offset, g_nrf.total_size);
