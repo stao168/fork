@@ -91,6 +91,25 @@ nRF24L01 的 SPI 接口**最高只支持 10MHz**，超过就会读写出错（�
   - Baud Rate Prescaler: F103 选 4，F407 选 8 —— 模块强制，CubeMX 随意
 - **GPIO**: PB13=SCK、PB14=MISO、PB15=MOSI（复用推挽）← 必须
 
+**DMA Settings 标签 → Add（必须，模块用 DMA 传输）**：
+
+| 板 | Request | Stream / Channel | Direction | Mode | Data Width | Increment |
+|---|---|---|---|---|---|---|
+| f103_c8 | `SPI2_RX` | DMA1 **Channel 4** | Peripheral To Memory | Normal | Byte / Byte | Memory ✓，Peripheral ✗ |
+| f103_c8 | `SPI2_TX` | DMA1 **Channel 5** | Memory To Peripheral | Normal | Byte / Byte | Memory ✓，Peripheral ✗ |
+| dji_c | `SPI2_RX` | DMA1 **Stream 3 / Channel 0** | Peripheral To Memory | Normal | Byte / Byte | Memory ✓，Peripheral ✗ |
+| dji_c | `SPI2_TX` | DMA1 **Stream 4 / Channel 0** | Memory To Peripheral | Normal | Byte / Byte | Memory ✓，Peripheral ✗ |
+
+Priority 随便（Medium 即可）。通道号 CubeMX 选中 Request 后会自动填，照上表核对一下即可。
+
+NVIC 里再勾上对应的两个 DMA 中断（f103_c8：`DMA1 channel4/5 global interrupt`；dji_c：`DMA1 stream3/4 global interrupt`）。**不需要**开 SPI2 全局中断，BSP 走 DMA 完成回调。
+
+> f103_c8 目前**没有** `dma.c`，CubeMX 生成后会新建一个（含 `MX_DMA_Init()`），并在 `main.c` 里自动把 `MX_DMA_Init()` 排在 `MX_SPI2_Init()` **之前**——顺序不能反，否则 DMA 时钟没开。dji_c 已经有 `MX_DMA_Init()`，只会往里加两个通道。
+>
+> `HAL_SPI_MspInit()` 里同时会多出 `__HAL_LINKDMA(&hspi2, hdmarx/hdmatx, ...)`，模块 `Init` 会检查这两个句柄，没链接上会直接报 `SPI2 DMA not configured` 并退出。
+>
+> damiao_h7 的 SPI2 DMA（`hdma_spi2_rx/tx`）**已经配好**，无需改动；但模块头文件的引脚宏目前只覆盖 F407/F103，上 H7 要先补一段芯片分支。
+
 ### 2. GPIO 配置（CE / CSN / IRQ）
 
 | 信号 | f103_c8 | dji_c | GPIO 模式 | 初始电平 | 上下拉 |
@@ -199,7 +218,7 @@ if (Module_NRF24L01_GetStatus() == 0) {
     │
 寄存器层: SPI指令封装(读/写寄存器, 读/写载荷, 清FIFO)
     │
-底层: BSP SPI 驱动(硬件SPI2, 线程安全+互斥锁) + 板级 GPIO(CE/CSN) + 板级 EXTI(IRQ)
+底层: BSP SPI 驱动(硬件SPI2, DMA 模式, 线程安全+互斥锁) + 板级 GPIO(CE/CSN) + 板级 EXTI(IRQ)
 ```
 
 ### 收发流程
@@ -232,10 +251,11 @@ if (Module_NRF24L01_GetStatus() == 0) {
 
 ## 上电自检与故障排查
 
-上电时每个寄存器写入都会**回读校验**（最多重试 3 次），失败会打印 `Reg 0xXX write verify failed: want=0x.. got=0x..`；此外单独校验 `FEATURE`（DPL/ACK 载荷必须激活成功），失败会打印 `FEATURE=0, ACTIVATE failed! DPL not enabled...`。
+上电时先检查 SPI2 的 DMA 句柄（`SPI2 DMA not configured: enable SPI2_RX/SPI2_TX DMA in CubeMX`），然后每个寄存器写入都会**回读校验**（最多重试 3 次），失败会打印 `Reg 0xXX write verify failed: want=0x.. got=0x..`；此外单独校验 `FEATURE`。
 
 | 现象 | 含义 / 排查方向 |
 |---|---|
+| `SPI2 DMA not configured` | CubeMX 没给 SPI2 配 DMA，模块直接不工作（见「CubeMX 配置 1」） |
 | 无 `write verify failed`、无 `FEATURE=0` | SPI、CE/CSN、ACTIVATE/DPL 全部正常 |
 | `write verify failed` 且 `got=0x00` | SPI 没通，查 SCK / MOSI / CSN 接线与模式0（CPOL=0/CPHA=0） |
 | `write verify failed` 且 `got=0xFF` | 查 MISO（总线一直被拉高/没接） |

@@ -3,7 +3,7 @@
  * @brief   nRF24L01 2.4GHz 无线模块实现
  *
  *  架构:
- *    - 底层: BSP SPI 驱动(硬件SPI2, 线程安全+互斥锁)
+ *    - 底层: BSP SPI 驱动(硬件SPI2, DMA 模式, 线程安全+互斥锁)
  *    - 寄存器层: nRF24L01 SPI指令封装(读/写寄存器, 读/写载荷, 清FIFO)
  *    - 协议层: Enhanced ShockBurst(自动ACK+重传) + 动态包长(DPL)
  *    - 框架层: 能力注册(指针+尺寸), 收发按 size 逐字节按位拷贝(小端)
@@ -66,19 +66,24 @@ typedef struct
     uint8_t  size;     /* 数据字节数 */
 } NRF_Cap_t;
 
-/* ================= 全局上下文(不含线程/栈) ================= */
+/* ================= 全局上下文(不含线程/栈/缓冲) ================= */
 typedef struct
 {
     NRF_Cap_t       caps[NRF24L01_MAX_CAPS]; /* 注册列表 */
     SPI_Device     *spi_dev;                 /* SPI设备句柄 */
     Offline_Device *offline_dev;             /* OFFLINE设备句柄 */
-    uint8_t         spi_buf[1 + NRF24L01_PAYLOAD_MAX]; /* SPI帧收发共用: [0]=命令, [1..]=载荷 */
-    uint16_t        total_size;                        /* 注册数据总字节数 */
-    uint8_t         cap_count;                         /* 已注册数量 */
-    uint8_t         initialized;                       /* 初始化标志 */
+    uint16_t        total_size;              /* 注册数据总字节数 */
+    uint8_t         cap_count;               /* 已注册数量 */
+    uint8_t         initialized;             /* 初始化标志 */
 } NRF_Ctx_t;
 
 static NRF_Ctx_t g_nrf;
+
+/* SPI 帧缓冲: [0]=命令, [1..]=载荷。
+ * DMA 下 TX/RX 是两条独立通道并发跑, 不能再像阻塞模式那样共用一块(会互相覆盖);
+ * BUFFER_SECTION 保证 DMA 可访问 + 32 字节对齐(与 WT606/REFEREE 同做法) */
+BUFFER_SECTION static uint8_t g_nrf_tx[1 + NRF24L01_PAYLOAD_MAX];
+BUFFER_SECTION static uint8_t g_nrf_rx[1 + NRF24L01_PAYLOAD_MAX];
 
 /* 模块内部变量: 线程/栈/信号量按其它模块(INS/REMOTE/WT606)的写法放在文件作用域
  * (栈需要 APPS_STACK_SECTION, 不能放进结构体) */
@@ -97,13 +102,13 @@ static const uint8_t kAddress[5] = {NRF24L01_ADDR};
 
 /* ================= 寄存器层: SPI 指令封装 ================= */
 
-/* 一次传输: 收发共用 g_nrf.spi_buf([0]=命令, [1..]=数据); 宏实现, 不再多一层函数调用 */
-#define nrf_spi(len) BSP_SPI_TransReceive(g_nrf.spi_dev, g_nrf.spi_buf, g_nrf.spi_buf, (uint16_t)(len), NRF24L01_SPI_TIMEOUT)
+/* 一次传输: 发 g_nrf_tx, 收 g_nrf_rx; 宏实现, 不再多一层函数调用 */
+#define nrf_spi(len) BSP_SPI_TransReceive(g_nrf.spi_dev, g_nrf_tx, g_nrf_rx, (uint16_t)(len), NRF24L01_SPI_TIMEOUT)
 
 /* 发命令帧: [0]=命令, [1..]=datalen 字节数据(数据由调用方先填好) */
 static inline void nrf_cmd(uint8_t cmd, uint8_t datalen)
 {
-    g_nrf.spi_buf[0] = cmd;
+    g_nrf_tx[0] = cmd;
     nrf_spi(1 + datalen);
 }
 
@@ -112,9 +117,9 @@ static inline void nrf_cmd(uint8_t cmd, uint8_t datalen)
  */
 static inline uint8_t nrf_read_reg(uint8_t reg)
 {
-    g_nrf.spi_buf[1] = NRF24L01_NOP;
+    g_nrf_tx[1] = NRF24L01_NOP; /* 时钟信号, 内容不关心 */
     nrf_cmd(NRF24L01_R_REGISTER | reg, 1);
-    return g_nrf.spi_buf[1];
+    return g_nrf_rx[1];
 }
 
 /**
@@ -122,7 +127,7 @@ static inline uint8_t nrf_read_reg(uint8_t reg)
  */
 static inline void nrf_write_reg(uint8_t reg, uint8_t value)
 {
-    g_nrf.spi_buf[1] = value;
+    g_nrf_tx[1] = value;
     nrf_cmd(NRF24L01_W_REGISTER | reg, 1);
 }
 
@@ -149,24 +154,24 @@ static int8_t nrf_write_reg_checked(uint8_t reg, uint8_t value)
  */
 static inline void nrf_write_regs(uint8_t reg, const uint8_t *buf, uint8_t len)
 {
-    memcpy(&g_nrf.spi_buf[1], buf, len);
+    memcpy(&g_nrf_tx[1], buf, len);
     nrf_cmd(NRF24L01_W_REGISTER | reg, len);
 }
 
 #if NRF24L01_RX_ENABLE
 /**
- * @brief 读 RX 有效载荷到 spi_buf[1..]
+ * @brief 读 RX 有效载荷到 g_nrf_rx[1..]
  */
 static inline void nrf_read_rx_payload(uint8_t len)
 {
-    memset(&g_nrf.spi_buf[1], NRF24L01_NOP, len);
+    memset(&g_nrf_tx[1], NRF24L01_NOP, len); /* 纯占位, 只为产生时钟 */
     nrf_cmd(NRF24L01_R_RX_PAYLOAD, len);
 }
 #endif /* NRF24L01_RX_ENABLE */
 
 #if NRF24L01_TX_ENABLE
 /**
- * @brief 发送 spi_buf[1..] 中的TX载荷(调用方已组包)
+ * @brief 发送 g_nrf_tx[1..] 中的TX载荷(调用方已组包)
  */
 static inline void nrf_write_tx_payload(uint8_t len)
 {
@@ -187,7 +192,7 @@ static inline void nrf_send_cmd(uint8_t cmd)
  */
 static inline void nrf_activate_feature(void)
 {
-    g_nrf.spi_buf[1] = NRF24L01_ACTIVATE_DATA;
+    g_nrf_tx[1] = NRF24L01_ACTIVATE_DATA;
     nrf_cmd(NRF24L01_ACTIVATE, 1);
 }
 
@@ -200,7 +205,7 @@ static inline void nrf_activate_feature(void)
 static inline uint8_t nrf_read_status(void)
 {
     nrf_cmd(NRF24L01_NOP, 0);
-    return g_nrf.spi_buf[0];
+    return g_nrf_rx[0]; /* 发命令时同步返回的状态字节 */
 }
 
 /* ================= 模式切换 ================= */
@@ -232,13 +237,13 @@ static void nrf_set_rx_mode(void)
 /* ================= 发送(仅 NRF24L01_TX_ENABLE=1 时编译) ================= */
 #if NRF24L01_TX_ENABLE
 
-/* 按注册表把各变量"当前值"拷入 spi_buf[1..](小端) */
+/* 按注册表把各变量"当前值"拷入 g_nrf_tx[1..](小端) */
 static void nrf_gather_tx(void)
 {
     for (uint8_t i = 0; i < g_nrf.cap_count; i++)
     {
         NRF_Cap_t *c = &g_nrf.caps[i];
-        memcpy(&g_nrf.spi_buf[1 + c->offset], c->data_ptr, c->size);
+        memcpy(&g_nrf_tx[1 + c->offset], c->data_ptr, c->size);
     }
 }
 
@@ -290,7 +295,7 @@ static void nrf_trigger_tx(void)
 {
     if (!g_nrf.initialized || g_nrf.cap_count == 0) return;
 
-    nrf_gather_tx(); /* 1. 读变量当前值 → spi_buf[1..] */
+    nrf_gather_tx(); /* 1. 读变量当前值 → g_nrf_tx[1..] */
 
     nrf_enter_tx(); /* 2. 切TX模式(CE低退出RX) */
     nrf_send_cmd(NRF24L01_FLUSH_TX);
@@ -319,7 +324,7 @@ static void nrf_handle_rx(void)
         uint8_t plen = nrf_read_reg(NRF24L01_R_RX_PL_WID);
         if (plen > 0 && plen <= NRF24L01_PAYLOAD_MAX)
         {
-            /* 读载荷到 spi_buf[1..] */
+            /* 读载荷到 g_nrf_rx[1..] */
             nrf_read_rx_payload(plen);
 
             /* 长度匹配才解码 */
@@ -328,7 +333,7 @@ static void nrf_handle_rx(void)
                 for (uint8_t i = 0; i < g_nrf.cap_count; i++)
                 {
                     NRF_Cap_t *c = &g_nrf.caps[i];
-                    memcpy(c->data_ptr, &g_nrf.spi_buf[1 + c->offset], c->size);
+                    memcpy(c->data_ptr, &g_nrf_rx[1 + c->offset], c->size);
                 }
                 /* OFFLINE 心跳更新 */
                 if (g_nrf.offline_dev)
@@ -409,13 +414,21 @@ void Module_NRF24L01_Init(void)
         return;
     }
 
+    /* 自检: 模块用 DMA 传输, hdmatx/hdmarx 必须已由板级 CubeMX 的 MSP 链接(_HAL_LINKDMA);
+     * 没配的话 HAL_SPI_TransmitReceive_DMA 会直接返回 HAL_ERROR, 表现为所有寄存器读写全失败 */
+    if (NRF24L01_SPI.hdmatx == NULL || NRF24L01_SPI.hdmarx == NULL)
+    {
+        LOG_E("SPI2 DMA not configured: enable SPI2_RX/SPI2_TX DMA in CubeMX (see README)");
+        return;
+    }
+
     /* CSN 由 BSP 管理 */
     SPI_Device_Init_Config spi_cfg = {0};
     spi_cfg.hspi    = &NRF24L01_SPI;
     spi_cfg.cs_port = NRF24L01_CSN_PORT;
     spi_cfg.cs_pin  = NRF24L01_CSN_PIN;
-    spi_cfg.tx_mode = SPI_MODE_BLOCKING;
-    spi_cfg.rx_mode = SPI_MODE_BLOCKING;
+    spi_cfg.tx_mode = SPI_MODE_DMA;
+    spi_cfg.rx_mode = SPI_MODE_DMA;
     g_nrf.spi_dev   = BSP_SPI_Device_Init(&spi_cfg);
     if (g_nrf.spi_dev == NULL)
     {
