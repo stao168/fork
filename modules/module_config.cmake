@@ -26,9 +26,10 @@ set(REMOTE_TASK_PRIORITY    9)      # 任务优先级
 set(REMOTE_TASK_VT_PRIORITY 8)      # 图传串口任务优先级
 set(REMOTE_OFFLINE_ENABLE      1)   # 遥控器离线检测
 set(REMOTE_VT_OFFLINE_ENABLE   1)   # 图传离线检测
-# PS2 手柄专用(REMOTE_SOURCE=3)
-# 注: SPI 句柄与 CS 引脚是板级的, 不在这里给默认值; 需要时在兵种 robot.cmake 里覆盖:
-#   set(REMOTE_PS2_SPI hspi2)  set(REMOTE_PS2_CS_PORT GPIOA)  set(REMOTE_PS2_CS_PIN GPIO_PIN_4)
+# PS2 手柄专用(REMOTE_SOURCE=3), 纯 GPIO bit-bang
+# 注: 4 个引脚是板级信息, 不在这里给默认值(由 module_remote.h 兜底); 需要时在兵种 robot.cmake 里覆盖:
+#   set(REMOTE_PS2_CLK_PORT GPIOB)  set(REMOTE_PS2_CLK_PIN GPIO_PIN_13)  ... DO/DI/CS 同理
+#   引脚需要板级 CubeMX 配好: CLK/DO/CS=推挽输出(初始高), DI=上拉输入; 模块不覆盖
 set(REMOTE_PS2_POLL_INTERVAL_MS 10)      # 轮询周期(ms), 100Hz
 
 # BMI088 默认参数

@@ -28,9 +28,28 @@
 #define REMOTE_DEAD_ZONE 10 /* 遥控器死区范围 */
 #endif
 
-/* PS2 手柄 (REMOTE_SOURCE == 3) 专用; SPI 句柄与 CS 引脚由兵种 robot.cmake 覆盖 */
-#ifndef REMOTE_PS2_SPI
-#define REMOTE_PS2_SPI hspi2 /* 独立接 PS2 接收器的 SPI */
+/* PS2 手柄 (REMOTE_SOURCE == 3) 专用
+ *
+ * 纯 GPIO bit-bang: 不占 SPI 外设, 4 个脚任意(所在端口的时钟需已使能)。
+ * 默认值 = f103_c8 上把原 SPI2 的三根线当普通 GPIO 用, 不用重新接线。
+ * 引脚与 CS 由兵种 robot.cmake 覆盖。 */
+#ifndef REMOTE_PS2_CLK_PORT
+#define REMOTE_PS2_CLK_PORT GPIOB /* CLK, 主机时钟, 空闲高 */
+#endif
+#ifndef REMOTE_PS2_CLK_PIN
+#define REMOTE_PS2_CLK_PIN GPIO_PIN_13
+#endif
+#ifndef REMOTE_PS2_DO_PORT
+#define REMOTE_PS2_DO_PORT GPIOB /* DO/CMD, 主机→手柄 (原 MOSI) */
+#endif
+#ifndef REMOTE_PS2_DO_PIN
+#define REMOTE_PS2_DO_PIN GPIO_PIN_15
+#endif
+#ifndef REMOTE_PS2_DI_PORT
+#define REMOTE_PS2_DI_PORT GPIOB /* DI/DAT, 手柄→主机 (原 MISO), 上拉输入 */
+#endif
+#ifndef REMOTE_PS2_DI_PIN
+#define REMOTE_PS2_DI_PIN GPIO_PIN_14
 #endif
 #ifndef REMOTE_PS2_CS_PORT
 #define REMOTE_PS2_CS_PORT GPIOA /* CS/SEL, 整帧 9 字节保持低 */
@@ -38,8 +57,11 @@
 #ifndef REMOTE_PS2_CS_PIN
 #define REMOTE_PS2_CS_PIN GPIO_PIN_4
 #endif
-#ifndef REMOTE_PS2_SPI_PRESCALER
-#define REMOTE_PS2_SPI_PRESCALER SPI_BAUDRATEPRESCALER_256 /* SCK ≤250kHz */
+#ifndef REMOTE_PS2_HALF_BIT_US
+#define REMOTE_PS2_HALF_BIT_US 5 /* 半周期(us): 手册上限 250kHz(4us), 例程用 5us(≈100kHz) 更稳 */
+#endif
+#ifndef REMOTE_PS2_BYTE_GAP_US
+#define REMOTE_PS2_BYTE_GAP_US 16 /* 字节间隔(us): PS2 协议要求 */
 #endif
 #ifndef REMOTE_PS2_POLL_INTERVAL_MS
 #define REMOTE_PS2_POLL_INTERVAL_MS 10 /* 轮询周期(ms), 100Hz */
@@ -52,6 +74,9 @@
 #endif
 #ifndef REMOTE_PS2_INVERT_Y
 #define REMOTE_PS2_INVERT_Y 0 /* 实测"上推"为负时置 1 取反 Y 轴 */
+#endif
+#ifndef REMOTE_PS2_POWER_ON_DELAY_MS
+#define REMOTE_PS2_POWER_ON_DELAY_MS 300 /* 上电后首次握手前的等待(ms), 也是握手重试间隔 */
 #endif
 
 /* 任务配置 */

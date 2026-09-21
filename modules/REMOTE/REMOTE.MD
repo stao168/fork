@@ -23,7 +23,7 @@ REMOTE 模块统一封装**遥控器**（SBUS / DT7 / PS2）和**图传键鼠**�
       or                    or
   dt7_decode()        vt03_decode()
       or
-  ps2_decode()  ← 唯一的非 UART 子源: 主机主动轮询 SPI, 没有 IDLE 中断
+  ps2_decode()  ← 唯一的非 UART 子源: 主机主动轮询(纯 GPIO bit-bang), 没有 IDLE 中断
        │                    │
        │  直接写入          │  直接写入
        ▼                    ▼
@@ -87,7 +87,7 @@ REMOTE 模块统一封装**遥控器**（SBUS / DT7 / PS2）和**图传键鼠**�
 | DT7 | 100000 | 18 字节 | 64 B | 50 ms | 通道边界检查 (364..1684) |
 | VT02 | 115200 | 不定长 | 128 B | 100 ms | CRC8 (帧头 5 字节) |
 | VT03 | 921600 | 21 字节 | 64 B | 100 ms | 帧头 0xA9 0x53 + CRC16 |
-| PS2 | SPI ≤250kHz | 9 字节 | — | 150 ms | `Data[1]` ∈ {0x73, 0x79} 且 `Data[2]==0x5A` |
+| PS2 | bit-bang 100kHz | 9 字节 | — | 150 ms | `Data[1]` ∈ {0x73, 0x79} 且 `Data[2]==0x5A` |
 
 ## API 接口说明
 
@@ -228,11 +228,22 @@ if (abs(ch) <= REMOTE_DEAD_ZONE)  // 死区
 
 2. **UART 波特率被子模块修改** — 子模块 init 会调用 `HAL_UART_Init()` 重配波特率（SBUS/DT7: 100000, VT02: 115200, VT03: 921600），确保 `REMOTE_UART` / `REMOTE_VT_UART` 不与其它外设共用。
 
-3. **PS2 需要独占一条 SPI** — CPOL/CPHA/FirstBit 是 SPI **外设级**属性，不能按设备区分，
-   `REMOTE_PS2_SPI` 不能与其它 SPI 设备共用，换用时需要给其中一个换总线。
+3. **PS2 走纯 GPIO bit-bang，不占 SPI 外设** — 4 个脚（CLK/DO/DI/CS）任意选，**不占 SPI 外设**。
+   代价是忙等 CPU ≈9%@100Hz，且时序会被中断拉长（PS2 容忍"更慢"）。
 
-4. **PS2 需要板级 CubeMX 配置** — 本模块不配引脚：需要一条 SPI（SCK/MISO/MOSI）+ 一个 CS GPIO（推挽输出，空闲高），
-   接收器建议 3.3V 供电（5V 会把 DI 上拉到 5V，可能超 STM32 IO 耐压）。
+4. **PS2 的 4 个引脚需要板级 CubeMX 配置** — 本模块只翻转电平，**不在 init 里覆盖引脚**：
+
+   | 信号 | CubeMX 配置 |
+   |------|------------|
+   | CLK / DO / CS | `GPIO_Output`，Push Pull，No pull-up/pull-down，Speed **High**，初始电平 **High** |
+   | DI | `GPIO_Input`，**Pull-up** |
+
+   `REMOTE_PS2_{CLK,DO,DI,CS}_{PORT,PIN}` 必须与 CubeMX 配的脚一致。
+   **DI 必须上拉** —— 接收器只是间歇性驱动 DI，不接/没配对时该脚悬空，会被相邻数据线串扰出假数据。
+   另外接收器建议 3.3V 供电（5V 会把 DI 上拉到 5V，可能超 STM32 IO 耐压）。
+
+5. **PS2 不能与其它设备共用这 4 个脚** — bit-bang 直接翻转引脚，共用的设备会被踩；换用时改
+   `REMOTE_PS2_{CLK,DO,DI,CS}_{PORT,PIN}`（同时在 CubeMX 里改）。
 
 
 ## 版本历史
@@ -242,4 +253,4 @@ if (abs(ch) <= REMOTE_DEAD_ZONE)  // 死区
 | v1.0 | 2026-05-10 | 初始版本 |
 | v1.1 | 2026-05-23 | 适配最新bsp_uart |
 | v1.2 | 2026-05-24 | SBUS/DT7/VT03 改为 for 循环帧头扫描模式，支持多帧累积解码 |
-| v1.3 | 2026-09-20 | 新增 PS2 无线手柄子源 (REMOTE_SOURCE=3, SPI 主动轮询) |
+| v1.3 | 2026-09-20 | 新增 PS2 无线手柄子源 (REMOTE_SOURCE=3, 纯 GPIO bit-bang 主动轮询) |
