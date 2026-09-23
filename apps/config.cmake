@@ -2,7 +2,7 @@
 # 在这里选择机器人和板型；配置文件是构建配置的唯一来源
 
 # 目标机器人 & 板型
-set(ROBOT "test") # hero / engineer / infantry3 / infantry4 / infantry5 / drone / sentry / darts / customcontrol
+set(ROBOT "target") # hero / engineer / infantry3 / infantry4 / infantry5 / drone / sentry / darts / customcontrol / target / test
 set(BOARD "single") # single / gimbal / chassis; sentry has no single_board
 
 # 板型校验
