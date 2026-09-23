@@ -13,13 +13,21 @@
  *    [7] 0x00         → 左摇杆 X (LX)
  *    [8] 0x00         → 左摇杆 Y (LY)
  *
+ *  时序: 纯 GPIO bit-bang。空闲 CLK=高; 下降沿双方输出本位, 上升沿双方采样
+ *        (等价 SPI 模式3 + LSB First); 每字节之间留 ~16us —— PS2 协议要求,
+ *        连续 clock 会让接收器的字节位置飘
+ *
+ *  引脚: 4 个脚(CLK/DO/DI/CS)由**板级 CubeMX** 配好, 本模块只翻转电平。
+ *        CLK/DO/CS = 推挽输出初始高;  DI = 上拉输入。
+ *        必须与 REMOTE_PS2_{CLK,DO,DI,CS}_{PORT,PIN} 保持一致。
+ *
  *  上电必须进"模拟模式并锁定", 否则手柄可能停在数字模式(摇杆读数固定), 且按 MODE 键会切走模式。
  */
 #include "ps2.h"
 
 #include "bsp_def.h"
-#include "bsp_spi.h"
-#include "spi.h"
+#include "bsp_dwt.h"
+#include "main.h"
 
 #include <stdbool.h>
 #include <stdlib.h>
@@ -30,8 +38,39 @@
 
 #if defined(REMOTE_SOURCE) && (REMOTE_SOURCE == 3)
 
-#define PS2_FRAME_LEN   9
-#define PS2_SPI_TIMEOUT 100 /* BSP SPI 超时(tick, 1 tick = 1ms) */
+#define PS2_FRAME_LEN 9
+
+/* 每次重试握手前的间隔(ms): 给接收器留 MCU 启动 + 无线配对的时间 */
+#define PS2_HANDSHAKE_RETRY_MS REMOTE_PS2_POWER_ON_DELAY_MS
+
+/* 时序周期数(在 init 里按 SystemCoreClock 算好, 单位=CPU 周期) */
+static uint32_t s_half_cycles;  /* 半周期 5us */
+static uint32_t s_gap_cycles;   /* 字节间隔 16us */
+static uint32_t s_setup_cycles; /* CS 建立 2us */
+
+/* 忙等到走过 cycles 个 CPU 周期。
+ *
+ * 不用 BSP_DWT_Delay: 它内部是 float 运算(__aeabi_fmul / __aeabi_f2uiz /
+ * __aeabi_ui2f), F103 没 FPU, 全部软件模拟 —— 每次调用要多花 ~4us!
+ * 5us 的半周期会被拖成 ~9us, 帧长从 864us 变 1471us, 时钟只剩 ~54kHz。 */
+static inline void ps2_delay_cycles(uint32_t cycles)
+{
+    const uint32_t t0 = DWT->CYCCNT;
+    while ((DWT->CYCCNT - t0) < cycles)
+    {
+    }
+}
+
+/* 4 个脚全是普通 GPIO(bit-bang 不占 SPI 外设)。
+ * 直接写 BSRR/读 IDR: HAL_GPIO_WritePin/ReadPin 是函数调用, 一帧 72 个时钟里
+ * 会被调用近 200 次, 开销同样会拉长半周期。 */
+#define PS2_CLK_HIGH() (REMOTE_PS2_CLK_PORT->BSRR = (uint32_t)REMOTE_PS2_CLK_PIN)
+#define PS2_CLK_LOW()  (REMOTE_PS2_CLK_PORT->BSRR = (uint32_t)REMOTE_PS2_CLK_PIN << 16)
+#define PS2_DO_HIGH()  (REMOTE_PS2_DO_PORT->BSRR = (uint32_t)REMOTE_PS2_DO_PIN)
+#define PS2_DO_LOW()   (REMOTE_PS2_DO_PORT->BSRR = (uint32_t)REMOTE_PS2_DO_PIN << 16)
+#define PS2_CS_LOW()   (REMOTE_PS2_CS_PORT->BSRR = (uint32_t)REMOTE_PS2_CS_PIN << 16)
+#define PS2_CS_HIGH()  (REMOTE_PS2_CS_PORT->BSRR = (uint32_t)REMOTE_PS2_CS_PIN)
+#define PS2_DI_READ()  ((REMOTE_PS2_DI_PORT->IDR & (uint32_t)REMOTE_PS2_DI_PIN) != 0U)
 
 #define PS2_CMD_START      0x01
 #define PS2_CMD_POLL       0x42
@@ -43,23 +82,58 @@
 #define PS2_STICK_BIAS 128 /* 摇杆原始中位 */
 #define PS2_STICK_MAX  660 /* 归一化量纲, 与 DT7/VT03 保持一致 */
 
+#define PS2_BAD_FRAME_LIMIT 20 /* 连续无效帧数达到就退回重新握手(100Hz 下约 200ms) */
+
 /* 上电配置序列(字节值以 WHEELTEC 例程 pstwo.c 为准) */
 static const uint8_t kShortPoll[PS2_FRAME_LEN]   = {0x01, 0x42, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 static const uint8_t kEnterConfig[PS2_FRAME_LEN] = {0x01, 0x43, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00};
 static const uint8_t kSetAnalog[PS2_FRAME_LEN]   = {0x01, 0x44, 0x00, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00}; /* 0x03=锁定模拟模式 */
 static const uint8_t kExitConfig[PS2_FRAME_LEN]  = {0x01, 0x43, 0x00, 0x00, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A};
 
-/* SPI 收发缓冲: 阻塞模式下 BSP 逐字节"先读后写", 但沿用独立两块更保险 */
+/* 收发缓冲 */
 BUFFER_SECTION static uint8_t ps2_tx[PS2_FRAME_LEN];
 BUFFER_SECTION static uint8_t ps2_rx[PS2_FRAME_LEN];
 
-static SPI_Device *ps2_spi;
-static bool        ps2_initialized;
+static bool ps2_initialized;
+static bool ps2_analog_ok; /* 是否已成功进入模拟模式 */
 
-/* 一帧收发: CS 由 BSP 包住整帧(transfer_begin 拉低 → transfer_end 拉高) */
-static int8_t ps2_transfer(void)
+/* 一个字节: LSB first。CLK 空闲高, 下降沿双方输出本位, 上升沿双方采样。 */
+static uint8_t ps2_transfer_byte(uint8_t out)
 {
-    return (BSP_SPI_TransReceive(ps2_spi, ps2_tx, ps2_rx, PS2_FRAME_LEN, PS2_SPI_TIMEOUT) == 0) ? 0 : -1;
+    uint8_t in = 0;
+
+    for (uint8_t bit = 0; bit < 8; bit++)
+    {
+        PS2_CLK_LOW(); /* 下降沿: 主机输出本位 */
+        if (out & 0x01)
+            PS2_DO_HIGH();
+        else
+            PS2_DO_LOW();
+        out >>= 1;
+        ps2_delay_cycles(s_half_cycles);
+
+        PS2_CLK_HIGH(); /* 上升沿: 双方采样 */
+        if (PS2_DI_READ()) in |= (uint8_t)(1u << bit);
+        ps2_delay_cycles(s_half_cycles);
+    }
+    return in;
+}
+
+/* 一帧 9 字节: CS 整帧保持低, 字节之间留 ~16us(PS2 协议要求) */
+static void ps2_transfer(void)
+{
+    PS2_CLK_HIGH(); /* 空闲高 */
+    PS2_CS_LOW();
+    ps2_delay_cycles(s_setup_cycles);
+
+    for (uint8_t i = 0; i < PS2_FRAME_LEN; i++)
+    {
+        ps2_rx[i] = ps2_transfer_byte(ps2_tx[i]);
+        ps2_delay_cycles(s_gap_cycles);
+    }
+
+    PS2_CLK_HIGH();
+    PS2_CS_HIGH();
 }
 
 /* 发一帧固定命令(配置序列用) */
@@ -85,15 +159,19 @@ static bool ps2_enter_analog(void)
             ps2_send(kShortPoll); /* ShortPoll ×3 */
         }
         ps2_send(kEnterConfig);
+        BSP_DWT_Delay(1e-3f); /* 给手柄状态机留时间 */
         ps2_send(kSetAnalog);
+        BSP_DWT_Delay(1e-3f);
         ps2_send(kExitConfig);
+        BSP_DWT_Delay(1e-3f);
         ps2_send(kShortPoll); /* 校验帧 */
 
         if (ps2_rx[1] == PS2_ID_ANALOG || ps2_rx[1] == PS2_ID_ANALOG_VIB)
         {
             return true;
         }
-        LOG_W("analog mode failed (ID=0x%02X), retry %u", ps2_rx[1], (unsigned)(attempt + 1));
+        LOG_W("analog fail %u: rx %02X %02X %02X %02X %02X %02X %02X %02X %02X", (unsigned)(attempt + 1), ps2_rx[0], ps2_rx[1],
+              ps2_rx[2], ps2_rx[3], ps2_rx[4], ps2_rx[5], ps2_rx[6], ps2_rx[7], ps2_rx[8]);
     }
     return false;
 }
@@ -108,31 +186,17 @@ static int16_t ps2_stick(uint8_t raw)
 
 int8_t remote_ps2_init(Offline_Device **out_offline)
 {
-    /* PS2 是 mode3 + LSB + 低速; 同 sbus 重配 UART 波特率的做法, 这里直接重配 SPI */
-    REMOTE_PS2_SPI.Init.CLKPolarity       = SPI_POLARITY_HIGH;
-    REMOTE_PS2_SPI.Init.CLKPhase          = SPI_PHASE_2EDGE;
-    REMOTE_PS2_SPI.Init.FirstBit          = SPI_FIRSTBIT_LSB;
-    REMOTE_PS2_SPI.Init.NSS               = SPI_NSS_SOFT;
-    REMOTE_PS2_SPI.Init.BaudRatePrescaler = REMOTE_PS2_SPI_PRESCALER;
-    if (HAL_SPI_Init(&REMOTE_PS2_SPI) != HAL_OK)
-    {
-        LOG_E("SPI re-init error");
-        return -1;
-    }
+    /* 4 个脚由**板级 CubeMX** 配置, 本模块只管翻转电平(同 LoRA 的 M0/M1/AUX)。
+     * 要求(必须与 REMOTE_PS2_* 宏一致, 否则自己用了哪个脚都看不出来):
+     *   CLK / DO / CS → GPIO_Output 推挽, 无上下拉, Speed High, 初始电平 High
+     *   DI            → GPIO_Input  上拉(接收器不应答时 DI 悬空, 不拉会被相邻数据线串扰)
+     * 这里不再 HAL_GPIO_Init 覆盖: 板子在 gpio.c 里看得见, 模块不要偷偷改別人配好的脚。 */
 
-    /* CS 由 BSP 管理, 整帧 9 字节期间保持低 */
-    SPI_Device_Init_Config spi_cfg = {0};
-    spi_cfg.hspi                   = &REMOTE_PS2_SPI;
-    spi_cfg.cs_port                = REMOTE_PS2_CS_PORT;
-    spi_cfg.cs_pin                 = REMOTE_PS2_CS_PIN;
-    spi_cfg.tx_mode                = SPI_MODE_BLOCKING;
-    spi_cfg.rx_mode                = SPI_MODE_BLOCKING;
-    ps2_spi                        = BSP_SPI_Device_Init(&spi_cfg);
-    if (ps2_spi == NULL)
-    {
-        LOG_E("BSP SPI device init failed");
-        return -1;
-    }
+    /* 把 us 换算成 CPU 周期(整数, 避免运行时软浮点开销) */
+    const uint32_t mhz = SystemCoreClock / 1000000U;
+    s_half_cycles      = REMOTE_PS2_HALF_BIT_US * mhz;
+    s_gap_cycles       = REMOTE_PS2_BYTE_GAP_US * mhz;
+    s_setup_cycles     = 2U * mhz;
 
     Offline_Init_config_t offline_cfg = {
         .name       = "ps2",
@@ -148,20 +212,35 @@ int8_t remote_ps2_init(Offline_Device **out_offline)
     }
     if (out_offline) *out_offline = offline;
 
-    if (!ps2_enter_analog())
-    {
-        LOG_E("enter analog mode failed, check wiring / 3.3V power / CS pin");
-        return -1;
-    }
-
+    /* 握手(进模拟模式)故意不在这里做:
+     * 本函数跑在 tx_application_define 里, 调度器还没起来 ——
+     *   - tx_thread_sleep() 会直接返回 TX_CALLER_ERROR(空操作)
+     *   - 用 DWT 忙等又会把 IWDG 的喂狗窗口撑爆(offline 任务还没开始喂) → 开机复位循环
+     * 所以推迟到解码任务里做(那里 tx_thread_sleep 有效, 且任务是周期性的能重试) */
     ps2_initialized = true;
-    LOG_I("ps2 init success (analog mode)");
+    LOG_I("ps2 init done, handshake deferred to task");
     return 0;
 }
 
 void remote_ps2_decode(Remote_Data_t *data, Offline_Device *offline)
 {
     if (!ps2_initialized || data == NULL) return;
+
+    /* 还没握上手: 先等接收器起来, 再重试(晚插/晚配对也能自恢复) */
+    if (!ps2_analog_ok)
+    {
+        tx_thread_sleep(PS2_HANDSHAKE_RETRY_MS);
+        if (ps2_enter_analog())
+        {
+            ps2_analog_ok = true;
+            LOG_I("analog mode OK");
+        }
+        else
+        {
+            LOG_W("analog mode failed, will retry (check wiring / 3.3V / CS pin)");
+        }
+        return;
+    }
 
     /* 组 poll 帧; [3]/[4] 是振动强度, 第一版不做(固定 0 = 不震) */
     ps2_tx[0] = PS2_CMD_START;
@@ -171,11 +250,23 @@ void remote_ps2_decode(Remote_Data_t *data, Offline_Device *offline)
         ps2_tx[i] = 0x00;
     }
 
-    if (ps2_transfer() != 0) return;
+    ps2_transfer();
 
     const uint8_t id = ps2_rx[1];
-    /* 非法帧(手柄关机/待机/未配对, 回包多为 0xFF / 0x00) → 不喂心跳, 交给 OFFLINE 判离线 */
-    if ((id != PS2_ID_ANALOG && id != PS2_ID_ANALOG_VIB) || ps2_rx[2] != PS2_ID_HEADER) return;
+    /* 非法帧(手柄关机/待机/未配对, 回包多为 0xFF / 0x00) → 不喂心跳, 交给 OFFLINE 判离线。
+     * 连续 PS2_BAD_FRAME_LIMIT 帧都无效就退回重新握手 —— 否则一次凑巧的 0x73 会卡死在
+     * "已进模拟模式"的状态里, 拔插/掉电后再也恢复不了。 */
+    static uint8_t s_bad_frames;
+    if ((id != PS2_ID_ANALOG && id != PS2_ID_ANALOG_VIB) || ps2_rx[2] != PS2_ID_HEADER)
+    {
+        if (++s_bad_frames >= PS2_BAD_FRAME_LIMIT)
+        {
+            s_bad_frames  = 0;
+            ps2_analog_ok = false;
+        }
+        return;
+    }
+    s_bad_frames = 0;
 
     /* 摇杆 → ±660 (上推为正) */
     data->channels[0] = ps2_stick(ps2_rx[7]); /* ch1 = LX */
@@ -195,14 +286,6 @@ void remote_ps2_decode(Remote_Data_t *data, Offline_Device *offline)
     data->ps2.rx      = ps2_rx[5];
     data->ps2.ry      = ps2_rx[6];
     data->ps2.mode    = id;
-
-    /* 首次收到合法帧时打印原始值, 方便上板确认摇杆方向与中位 */
-    static bool s_first_frame = false;
-    if (!s_first_frame)
-    {
-        s_first_frame = true;
-        LOG_I("raw: LX=%u LY=%u RX=%u RY=%u buttons=0x%04X", ps2_rx[7], ps2_rx[8], ps2_rx[5], ps2_rx[6], data->ps2.buttons);
-    }
 
     Module_Offline_device_update(offline);
 }
