@@ -13,6 +13,7 @@
  * ────────────────────────────────────────────────────────────────
  */
 #include "robot_control.h"
+#include "module_remote.h"
 #include "tx_api.h"
 #include "bsp_def.h"
 
@@ -23,7 +24,7 @@
 /* ========== 主循环任务 ========== */
 static TX_THREAD                  g_test_loop_thread;
 APPS_STACK_SECTION static uint8_t g_test_loop_stack[1024];
-
+static ps2_custom_t *ps2;
 static void test_loop_task_entry(ULONG arg)
 {
     (void)arg;
@@ -31,10 +32,16 @@ static void test_loop_task_entry(ULONG arg)
     while (1)
     {
         /* ===== 临时测试区 (工作流②): 测试新模块 API, 成功后删除 ===== */
-        /* 示例: 调用/注册待测模块 API, 周期性打印或触发验证          */
+        ps2 = Module_Remote_get_ps2_custom();
+        if (ps2 != NULL)
+        {
+            LOG_I("PS2 mode=0x%02X ch=%d,%d,%d,%d btn=0x%04X | %s", ps2->mode, Module_Remote_get_channel(1),
+                  Module_Remote_get_channel(2), Module_Remote_get_channel(3), Module_Remote_get_channel(4), ps2->buttons,
+                  (Module_Remote_get_offline_status() & 0x01) ? "ONLINE" : "OFFLINE");
+        }
         /* ============================================================ */
 
-        tx_thread_sleep(10);
+        tx_thread_sleep(500);
     }
 }
 
