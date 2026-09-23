@@ -218,6 +218,11 @@ int8_t remote_ps2_init(Offline_Device **out_offline)
      *   - 用 DWT 忙等又会把 IWDG 的喂狗窗口撑爆(offline 任务还没开始喂) → 开机复位循环
      * 所以推迟到解码任务里做(那里 tx_thread_sleep 有效, 且任务是周期性的能重试) */
     ps2_initialized = true;
+    /* 打出实际编译进来的引脚: 板级覆盖 / module_remote.h 默认值 / 烧错 elf, 一眼能分清 */
+    LOG_I("ps2 pins: CLK=%p:0x%04X DO=%p:0x%04X", (void *)REMOTE_PS2_CLK_PORT, (unsigned)REMOTE_PS2_CLK_PIN,
+          (void *)REMOTE_PS2_DO_PORT, (unsigned)REMOTE_PS2_DO_PIN);
+    LOG_I("ps2 pins: DI=%p:0x%04X CS=%p:0x%04X", (void *)REMOTE_PS2_DI_PORT, (unsigned)REMOTE_PS2_DI_PIN,
+          (void *)REMOTE_PS2_CS_PORT, (unsigned)REMOTE_PS2_CS_PIN);
     LOG_I("ps2 init done, handshake deferred to task");
     return 0;
 }

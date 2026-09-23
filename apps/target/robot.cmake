@@ -29,7 +29,8 @@ set(REMOTE_PS2_CS_PORT  GPIOA)
 set(REMOTE_PS2_CS_PIN   GPIO_PIN_1)
 # 注意: 这 4 个脚必须在板级 CubeMX 里配好 —— CLK/DO/CS = 推挽输出(初始高), DI = 上拉输入
 
-# f103_c8: SPI2 的三根线已改成普通 GPIO 给 PS2 用, CubeMX 不再生成 spi.c/h,
-# 而 board/bsp/SPI/bsp_spi.c 无条件 #include "spi.h" → 关掉 BSP SPI 外设。
-# 换到别的板子(仍用 SPI 外设)时删掉这一行。
+# f103_c8 的 SPI2 仍是 Disable 状态(没有生成的 spi.c/spi.h), 而 board/bsp/SPI/bsp_spi.c
+# 无条件 #include "spi.h" → 这个兵种关掉 BSP SPI 外设。
+# 在 CubeMX 里把 SPI2 重新 Enable(生成出 spi.h)之后, 这一行就能删掉。
 set(BSP_SPI_ENABLE OFF)
+
