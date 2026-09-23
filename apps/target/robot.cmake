@@ -1,11 +1,11 @@
 # target 兵种 — 靶车 (F1 控制)
-# 模块: OFFLINE(离线检测) + REMOTE(PS2 手柄)
-# 说明: 电机(DJI / 达妙)后续再加, 现在先只验证 PS2 通道读取
+# 模块: OFFLINE(离线检测) + REMOTE(PS2 手柄) + MOTOR(达妙 DM6220)
+# 说明: 手柄按键开关达妙 DM6220, 开启后 0.4 转/秒定速旋转
 
 include(${CMAKE_CURRENT_LIST_DIR}/../../modules/module_config.cmake)
 
 # 模块开关(按板型覆盖默认值)
-set(MODULES_SINGLE   OFFLINE REMOTE)
+set(MODULES_SINGLE   OFFLINE REMOTE MOTOR)
 
 # OFFLINE 参数
 set(OFFLINE_WATCHDOG_ENABLE 1)    # 开启看门狗

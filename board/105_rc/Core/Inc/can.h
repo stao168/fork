@@ -1,11 +1,3 @@
-/*
- * @Author: AdoreElysia w2006825@qq.com
- * @Date: 2026-07-25 16:56:24
- * @LastEditors: AdoreElysia w2006825@qq.com
- * @LastEditTime: 2026-07-26 09:16:39
- * @FilePath: \mas_embedded_threadx-f103\board\105_rc\Core\Inc\can.h
- * @Description: 
- */
 /* USER CODE BEGIN Header */
 /**
   ******************************************************************************
@@ -39,6 +31,7 @@ extern "C" {
 /* USER CODE BEGIN Includes */
 extern CAN_HandleTypeDef hcan1;
 /* USER CODE END Includes */
+
 extern CAN_HandleTypeDef hcan2;
 
 /* USER CODE BEGIN Private defines */

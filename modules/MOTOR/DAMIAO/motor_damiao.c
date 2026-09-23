@@ -11,9 +11,11 @@
 #define LOG_LVL LOG_LVL_DBG
 #include "ulog_def.h"
 
-/* 达妙电机参数配置表 */
+/* 达妙电机参数配置表
+ * 字段顺序: p_min, p_max, v_min, v_max, kp_min, kp_max, kd_min, kd_max, t_min, t_max */
 static const DM_Motor_Params_t dm_motor_params[] = {
-    {-12.5f, 12.5f, -30.0f, 30.0f, 0.0f, 500.0f, 0.0f, 5.0f, -10.0f, 10.0f}, /* DM4310 */
+    {-12.5f, 12.5f, -30.0f, 30.0f, 0.0f, 500.0f, 0.0f, 5.0f, -10.0f, 10.0f}, /* DM4310, V ±30 rad/s */
+    {-12.5f, 12.5f, -45.0f, 45.0f, 0.0f, 500.0f, 0.0f, 5.0f, -10.0f, 10.0f}, /* DM6220, V ±45 rad/s */
 };
 
 static const DM_Motor_Params_t *dm_get_params(Motor_Type_e type)
@@ -22,6 +24,8 @@ static const DM_Motor_Params_t *dm_get_params(Motor_Type_e type)
     {
     case DM4310:
         return &dm_motor_params[0];
+    case DM6220:
+        return &dm_motor_params[1];
     /* 后续在此添加其他型号映射 */
     default:
         return &dm_motor_params[0];
@@ -319,7 +323,7 @@ DM_Motor_t *Motor_DM_Init(Motor_Init_Config_s *config, uint32_t DM_Mode_type)
     Motor_DM_Cmd(motor, DM_CMD_MOTOR_START);
 
     /* 注册到全局链表 */
-    motor->base.Apply   = dm_apply;
+    motor->base.Apply = dm_apply;
     Motor_Register(&motor->base);
 
     LOG_I("DM motor initialized (type=%d, mode=0x%03X)", motor->base.info.motor_type, DM_Mode_type);
