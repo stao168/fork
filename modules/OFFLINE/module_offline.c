@@ -189,9 +189,9 @@ void Module_Offline_init(void)
 #if defined(STM32H723xx)
     MX_IWDG1_Init();
     __HAL_DBGMCU_FREEZE_IWDG1();
-#elif defined(STM32F407xx)
+#elif defined(STM32F407xx) || defined(STM32F105xC)
     MX_IWDG_Init();
-    __HAL_DBGMCU_FREEZE_IWDG();
+    __HAL_DBGMCU_FREEZE_IWDG(); /* F105 有 DBG_IWDG_STOP, 调试暂停不会饿死看门狗 */
 #endif
 #endif
 
