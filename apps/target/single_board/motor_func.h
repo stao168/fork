@@ -14,9 +14,8 @@
 void motor_func_init(void);
 
 /**
- * @brief 每周期调用: 把按键事件翻译成电机动作
+ * @brief 每周期调用: 方向键 → 转速, 其余按键 → 启停/换向/模式
  */
-void motor_func(const Remote_Btn_Event_t *evt);
+void motor_func(const Remote_Input_t *in);
 
 #endif /* _MOTOR_FUNC_H_ */
-

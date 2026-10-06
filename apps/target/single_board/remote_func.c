@@ -18,40 +18,67 @@
 #define LOG_LVL LOG_LVL_INFO
 #include "ulog_def.h"
 
-static ps2_custom_t *ps2;
-
 /* 上一次按键状态 (取上升沿用) */
-static bool last_dm_toggle;
-static bool last_dm_arm;
 static bool last_m3508_toggle;
+static bool last_dm_power;
+static bool last_dm_clear;
+static bool last_dm_fixed;
+static bool last_dm_throttle;
+static bool last_dm_dir;
 
 void remote_func_init(void)
 {
-    ps2 = Module_Remote_get_ps2_custom();
-    if (ps2 == NULL) LOG_E("ps2 remote not ready");
+    if (Module_Remote_get_data() == NULL) LOG_E("remote not ready");
 }
 
-void remote_func(Remote_Btn_Event_t *evt)
+void remote_func(Remote_Input_t *in)
 {
-    if (evt == NULL) return;
+    if (in == NULL) return;
 
-    evt->dm_toggle    = false;
-    evt->dm_arm       = false;
-    evt->m3508_toggle = false;
+    in->m3508_toggle = false;
+    in->dm_power     = false;
+    in->dm_clear     = false;
+    in->dm_fixed     = false;
+    in->dm_throttle  = false;
+    in->dm_dir       = false;
+    in->key_fwd      = false;
+    in->key_back     = false;
+    in->key_acc      = false;
+    in->key_dec      = false;
 
-    ps2 = Module_Remote_get_ps2_custom();
-    if (ps2 == NULL) return;
+    Remote_Data_t *data = Module_Remote_get_data();
+    if (data == NULL) return;
 
-    bool dm_toggle    = (ps2->buttons & TARGET_DM_TOGGLE_BTN) != 0;
-    bool dm_arm       = (ps2->buttons & TARGET_DM_ARM_BTN) != 0;
-    bool m3508_toggle = (ps2->buttons & TARGET_3508_TOGGLE_BTN) != 0;
+    /* 手柄掉线时 data 停在最后一帧: 方向键必须清零, 否则电机会一直按最后的方向跑 */
+    if ((Module_Remote_get_offline_status() & 0x01) == 0) return;
+
+    const uint16_t btn = data->ps2.buttons;
+
+    bool m3508_toggle = (btn & TARGET_3508_ON_BTN) != 0;
+    bool dm_power     = (btn & TARGET_DM_POWER_BTN) != 0;
+    bool dm_clear     = (btn & TARGET_DM_CLEAR_BTN) != 0;
+    bool dm_fixed     = (btn & TARGET_DM_FIXED_BTN) != 0;
+    bool dm_throttle  = (btn & TARGET_DM_THROTTLE_BTN) != 0;
+    bool dm_dir       = (btn & TARGET_DM_DIR_BTN) != 0;
 
     /* 上升沿: 按一下只触发一次 */
-    evt->dm_toggle    = dm_toggle && !last_dm_toggle;
-    evt->dm_arm       = dm_arm && !last_dm_arm;
-    evt->m3508_toggle = m3508_toggle && !last_m3508_toggle;
+    in->m3508_toggle = m3508_toggle && !last_m3508_toggle;
+    in->dm_power     = dm_power && !last_dm_power;
+    in->dm_clear     = dm_clear && !last_dm_clear;
+    in->dm_fixed     = dm_fixed && !last_dm_fixed;
+    in->dm_throttle  = dm_throttle && !last_dm_throttle;
+    in->dm_dir       = dm_dir && !last_dm_dir;
 
-    last_dm_toggle    = dm_toggle;
-    last_dm_arm       = dm_arm;
     last_m3508_toggle = m3508_toggle;
+    last_dm_power     = dm_power;
+    last_dm_clear     = dm_clear;
+    last_dm_fixed     = dm_fixed;
+    last_dm_throttle  = dm_throttle;
+    last_dm_dir       = dm_dir;
+
+    /* 方向键是电平: 按住就有效 */
+    in->key_fwd  = (btn & TARGET_3508_FWD_BTN) != 0;
+    in->key_back = (btn & TARGET_3508_BACK_BTN) != 0;
+    in->key_acc  = (btn & TARGET_DM_ACC_BTN) != 0;
+    in->key_dec  = (btn & TARGET_DM_DEC_BTN) != 0;
 }

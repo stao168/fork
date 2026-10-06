@@ -23,7 +23,7 @@
 static TX_THREAD                  g_ctrl_thread;
 APPS_STACK_SECTION static uint8_t g_ctrl_stack[1024];
 
-static Remote_Btn_Event_t btn_evt; /* 本周期按键事件 */
+static Remote_Input_t remote_in; /* 本周期遥控输入 (按键事件 + 方向键电平) */
 
 static void target_ctrl_task_entry(ULONG arg)
 {
@@ -31,8 +31,8 @@ static void target_ctrl_task_entry(ULONG arg)
 
     while (1)
     {
-        remote_func(&btn_evt); /* 读手柄 → 按键事件 */
-        motor_func(&btn_evt);  /* 按键事件 → 电机动作 */
+        remote_func(&remote_in); /* 读手柄 → 按键事件 + 方向键 */
+        motor_func(&remote_in);  /* 按键/方向键 → 电机动作 */
 
         /* TODO: 云台控制 */
         /* TODO: 底盘控制 */
