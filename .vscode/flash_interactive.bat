@@ -25,6 +25,11 @@ if /I "%BOARD%"=="dji_c" (
     set "JLINK_DEV=STM32F407IG"
     goto :board_ok
 )
+if /I "%BOARD%"=="105_rc" (
+    set "TARGET=stm32f1x"
+    set "JLINK_DEV=STM32F105RC"
+    goto :board_ok
+)
 exit /b 1
 
 :board_ok

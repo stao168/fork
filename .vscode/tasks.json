@@ -7,7 +7,8 @@
             "description": "选择开发板",
             "options": [
                 "damiao_h7",
-                "dji_c"
+                "dji_c",
+                "105_rc"
             ],
             "default": "dji_c"
         },
