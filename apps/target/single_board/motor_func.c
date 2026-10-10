@@ -52,7 +52,7 @@ static void m3508_init(void)
         .transport = MOTOR_TRANSPORT_CAN,
         .transport_config.can =
             {
-                /* CAN1 (dji_c: PD0=RX / PD1=TX);
+                /* CAN1 (105_rc: PA11=RX / PA12=TX, 默认引脚组, 不做重映射);
                  * tx_id = C620 电调 ID, 必须和电调拨码一致; 反馈 ID 自动 = 0x200 + tx_id */
                 .hcan  = BSP_CAN_HANDLE1,
                 .tx_id = 8,
