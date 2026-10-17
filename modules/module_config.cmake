@@ -2,7 +2,7 @@
 # 各 apps/<robot>/robot.cmake 应先 include 本文件，再覆盖差异项。
 # 覆盖方式：直接 set(变量名 新值) 即可，无需前缀。
 
-# 可用模块列表 OFFLINE REMOTE BMI088 INS REFEREE SUPERCAP WT606 MOTOR BOARDCOMM VISION LORA VOFA
+# 可用模块列表 OFFLINE REMOTE BMI088 INS REFEREE SUPERCAP WT606 MOTOR BOARDCOMM VISION LORA VOFA HI04
 
 # 默认模块列表
 set(MODULES_SINGLE   OFFLINE REMOTE BMI088 INS REFEREE SUPERCAP MOTOR)
@@ -55,6 +55,10 @@ set(WT606_UART              huart1) # 串口选择
 set(WT606_TASK_STACK_SIZE   1024)   # 任务栈大小
 set(WT606_TASK_PRIORITY     8)      # 任务优先级
 set(WT606_OFFLINE_ENABLE    1)      # 离线检测开启
+
+# HI04 默认参数(HI04 = HiPNUC HI91 外置 IMU; 串口硬编码 huart1 @921600, 见 module_hi04.c)
+set(HI04_TASK_STACK_SIZE    1024)   # 任务栈大小
+set(HI04_TASK_PRIORITY      11)     # 任务优先级
 
 # MOTOR 默认参数
 set(MOTOR_TASK_STACK_SIZE   1024)   # 任务栈大小 

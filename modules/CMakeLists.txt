@@ -76,6 +76,14 @@ if(MODULE_WT606)
     list(APPEND _module_includes ${CMAKE_CURRENT_SOURCE_DIR}/WT606)
 endif()
 
+if(MODULE_HI04)
+    list(APPEND _module_sources
+        HI04/module_hi04.c
+        HI04/hipnuc_dec.c
+    )
+    list(APPEND _module_includes ${CMAKE_CURRENT_SOURCE_DIR}/HI04)
+endif()
+
 if(MODULE_SUPERCAP)
     list(APPEND _module_sources
         SuperCap/module_supercap.c

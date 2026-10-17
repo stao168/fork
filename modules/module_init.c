@@ -44,6 +44,9 @@
 #if MODULE_VOFA
 #include "vofa.h"
 #endif
+#if MODULE_HI04
+#include "module_hi04.h"
+#endif
 
 
 #define LOG_LVL LOG_LVL_INFO
@@ -60,6 +63,9 @@ void MODULE_Init(void)
 #endif
 #if MODULE_BMI088
     Module_BMI088_init();
+#endif
+#if MODULE_HI04
+    Module_HI04_init();
 #endif
 #if MODULE_INS
     Module_INS_Init();

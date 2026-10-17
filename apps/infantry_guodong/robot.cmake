@@ -4,13 +4,13 @@
 
 include(${CMAKE_CURRENT_LIST_DIR}/../../modules/module_config.cmake)
 
-# 模块开关(按板型) —— 【阶段2-B: yaw 单轴开环测电机】
-#   云台板:遥控(SBUS) + 板间下发 + BMI088/INS + MOTOR
+# 模块开关(按板型) —— 【阶段3: yaw 闭环已通, 开始接外置 IMU】
+#   云台板:遥控(SBUS) + 板间下发 + BMI088/INS + MOTOR + HI04(俯仰框上的 HiPNUC HI91)
 #           gimbal_func.c 里 GD_YAW_ONLY=1 => 只初始化 yaw(GM6020), pitch(DM4310) 不碰
+#           HI04 现在只收+解析+打日志, 不进任何控制
 #   底盘板:四轮全向轮 + 板间接收(无遥控、无 IMU)
-# 后续:
-#   阶段2-C 上速度环/位置环; 之后按需加 VISION / REFEREE
-set(MODULES_GIMBAL   OFFLINE REMOTE BMI088 INS MOTOR BOARDCOMM)
+# 后续: 用 HI04 的角速度做 pitch 反馈 / 给 VISION 做姿态源
+set(MODULES_GIMBAL   OFFLINE REMOTE BMI088 INS MOTOR BOARDCOMM HI04)
 set(MODULES_CHASSIS  OFFLINE MOTOR BOARDCOMM)
 
 # ── OFFLINE ──
