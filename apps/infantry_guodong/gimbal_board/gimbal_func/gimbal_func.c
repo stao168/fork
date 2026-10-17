@@ -29,8 +29,8 @@
 #define LOG_LVL LOG_LVL_DBG
 #include "ulog_def.h"
 
-/* 【阶段2-B 调试, 用完改回 0】1 = 只初始化 yaw(GM6020), 跳过 pitch(DM4310)。
- * 理由: DM4310 走 MIT 模式, 使能后 CAN 一断就保持最后一个力矩; 测 yaw 时没必要让它通电。 */
+/* 1 = 只初始化 yaw(GM6020), 跳过 pitch(DM4310)。pitch 还没调, 先不让它通电:
+ * DM4310 走 MIT 模式, 使能后 CAN 一断就保持最后一个力矩。调 pitch 时改回 0。 */
 #define GD_YAW_ONLY 1
 
 static DJI_Motor_t *yaw_motor   = NULL; /* Yaw: GM6020 @ CAN2 */
@@ -72,13 +72,15 @@ void gimbal_init(void)
                 .other_angle_feedback_ptr = &ins->YawTotalAngle_rad,
                 .other_speed_feedback_ptr = &bmi088_dev->gyro[2],
                 /* ⚠ MaxOut 必须给: 框架 f_Output_Limit 是无条件限幅, MaxOut=0 时输出恒为 0 */
-                .angle_PID = {.Kp = 0.0f, .MaxOut = TMAX_GM6020}, /* TODO(阶段2-C):标定 */
-                .speed_PID = {.Kp = 0.0f, .MaxOut = TMAX_GM6020}, /* TODO(阶段2-C):标定 */
+                /* 角度环输出单位是 rad/s(MaxOut=15.71), 送给速度环当 ref */
+                .angle_PID = {.Kp = GIMBAL_YAW_ANGLE_KP, .MaxOut = GIMBAL_YAW_ANGLE_MAX_W},
+                /* 【阶段2-C 速度环】Kp 由旧工程换算, 推导见 guodong_def.h 的 GIMBAL_YAW_SPEED_KP */
+                .speed_PID = {.Kp = GIMBAL_YAW_SPEED_KP, .MaxOut = TMAX_GM6020},
             },
         .setting_init_config =
             {
                 .algorithm_type        = CONTROL_PID,
-                .loop_type             = ANGLE_AND_SPEED_LOOP,
+                .loop_type             = ANGLE_AND_SPEED_LOOP, /* 阶段2-D: 角度环串速度环 */
                 .angle_feedback_source = 1,
                 .speed_feedback_source = 1,
                 .feedback_reverse_flag = 0, /* TODO(阶段1):按实车确认 */
@@ -134,11 +136,11 @@ void gimbal_init(void)
 }
 
 /*
- * @brief 云台控制 —— 【阶段2-B: yaw 单轴开环前馈】
- *   gimbal_cmd->yaw ∈ [-1,1](左摇杆 ch3) → 正比于 GIMBAL_YAW_TEST_TORQUE_NM 的前馈力矩。
- *   PID 增益仍为 0, 所以下发的是纯前馈: 只看 GM6020 转不转、往哪边转、ecd 反馈对不对。
- *   *yaw_ecd 用真实编码器上报(阶段1 是写死的对齐常数), 顺便可读出"云台正前方"的 ecd。
- * TODO(阶段2-C): 恢复角度+速度串级闭环, 按 gimbal_mode 分支, 加 pitch 限位与前馈。
+ * @brief 云台控制 —— 【阶段2-D: yaw 角度+速度串级】
+ *   摇杆累加到目标角(旧工程 Gimbal.c 同款): 按住持续转, 松手停在当前角, 外力推会回弹。
+ *   角度环 measure = INS 多圈 yaw(rad) → 出 rad/s; 速度环 measure = 机体 gyro_z → 出 N·m。
+ *   增益/限幅均由旧工程换算, 推导见 guodong_def.h。
+ * TODO(阶段2-E): 按 gimbal_mode 分支 + pitch 轴 + 限位。
  */
 void gimbal_func(Gimbal_Ctrl_Cmd_t *gimbal_cmd, uint16_t *yaw_ecd)
 {
@@ -153,8 +155,29 @@ void gimbal_func(Gimbal_Ctrl_Cmd_t *gimbal_cmd, uint16_t *yaw_ecd)
     /* 板间夹角用 GM6020 自己的编码器(不是 IMU), 给底盘板做跟随 */
     if (yaw_ecd != NULL) *yaw_ecd = yaw_motor->measure.ecd;
 
+    /* ⚠ 速度环的反馈是 IMU 陀螺: IMU 一旦挂了 gyro_z 会卡住, PID 以为"永远不够快"而满力矩飞车。
+     * BMI088 / INS 都没有注册到 OFFLINE 模块(只注册了 sbus/boardcomm/电机), 只能在这里自己判。 */
+    if (!ins->initialized || !bmi088_dev->initialized)
+    {
+        Motor_Stop((Motor_Base *)yaw_motor);
+        return;
+    }
+
+    /* 摇杆累加目标角。gimbal_cmd->yaw 已经带符号(右推为负), 所以 += 就是右推时目标角减小。
+     * 摇杆回中时 sbus 死区(REMOTE_DEAD_ZONE)保证 ch4 恰好为 0, 目标角不会慢慢漂。 */
+    static float   yaw_target_rad;
+    static uint8_t yaw_target_inited;
+
+    if (!yaw_target_inited)
+    {
+        /* 第一次用当前姿态初始化, 避免目标 0 与当前角度差很多时云台猛转 */
+        yaw_target_rad    = ins->YawTotalAngle_rad;
+        yaw_target_inited = 1;
+    }
+    yaw_target_rad += GIMBAL_YAW_STICK_STEP_RAD * gimbal_cmd->yaw;
+
     Motor_Start((Motor_Base *)yaw_motor);
-    Motor_SetForwardTorque((Motor_Base *)yaw_motor, gimbal_cmd->yaw * GIMBAL_YAW_TEST_TORQUE_NM);
+    Motor_SetRef((Motor_Base *)yaw_motor, yaw_target_rad); /* 角度环 ref = 目标角(rad) */
 
     if (pitch_motor != NULL) Motor_Stop((Motor_Base *)pitch_motor);
 
@@ -162,8 +185,9 @@ void gimbal_func(Gimbal_Ctrl_Cmd_t *gimbal_cmd, uint16_t *yaw_ecd)
     if (++log_div >= 250) /* 2ms × 250 = 500ms */
     {
         log_div = 0;
-        LOG_I("yaw ff=%.3fNm | ecd=%d spd=%.2frad/s out=%.3fNm", (double)(gimbal_cmd->yaw * GIMBAL_YAW_TEST_TORQUE_NM), yaw_motor->measure.ecd,
-              (double)yaw_motor->base.measure.speed_rad, (double)yaw_motor->base.controller.output_torque);
+        LOG_I("yaw tgt=%.2f ref_w=%.2f spd=%.2f rad/s | out=%.3fNm | ecd=%d | imu=%.2frad", (double)yaw_target_rad,
+              (double)yaw_motor->base.controller.angle_PID.Output, (double)bmi088_dev->gyro[2], (double)yaw_motor->base.controller.output_torque,
+              yaw_motor->measure.ecd, (double)ins->YawTotalAngle_rad);
     }
 }
 
