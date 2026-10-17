@@ -30,6 +30,10 @@
 #define GIMBAL_PITCH_STICK_RATE      5.0f      /* Gimbal_LeverSpeedMapRate */
 #define GIMBAL_YAW_PITCH_RATE        1.5f      /* Gimbal_YawPitchSpeedRate */
 #define GIMBAL_PITCH_FF_NM           (-0.85f)  /* 旧 Gimbal.c 常数前馈力矩 (N·m) */
+/* 【阶段2-B 调试, 用完删】yaw 开环力矩测试: 左摇杆(ch3) ±1 → ±这个力矩(N·m)。
+ * 框架 Motor_CalculateTorque() = PID输出 + feedforward, 而 yaw 的 Kp 还是 0,
+ * 所以给出的就是纯前馈力矩。0.2 N·m ≈ 0.27 A(GM6020), 够看方向又不至于甩起来。 */
+#define GIMBAL_YAW_TEST_TORQUE_NM    0.2f
 
 /* -- 底盘(全向轮; 旧工程文件名叫 Mecanum.c, 但实车是全向轮) -- */
 #define CHASSIS_WHEEL_RADIUS_M       0.081f    /* Mecanum_WheelRadius = 8.1cm */

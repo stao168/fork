@@ -52,8 +52,10 @@ void RemoteControlSet(Chassis_Ctrl_Cmd_t *Chassis_Ctrl, Shoot_Ctrl_Cmd_t *Shoot_
                 Chassis_Ctrl->chassis_mode = chassis_zero_force;
         }
 
-        /* 云台与发射机构: 阶段1 还没启用, 一律给安全值 */
-        Gimbal_Ctrl->yaw         = 0.0f;
+        /* 【阶段2-B 调试, 用完删】左摇杆(ch3) → yaw 开环力矩比例 [-1,1]。
+         * 用 ch3 而不是三档开关: 松手回中自动为 0, 且不碰底盘(ch1/ch2)和底盘模式(CH8)。
+         * gimbal_mode 阶段2-B 不参与判断, 这里保持 zero_force 不误导。 */
+        Gimbal_Ctrl->yaw         = (float)Module_Remote_get_channel(3) * ch_scale;
         Gimbal_Ctrl->pitch       = 0.0f;
         Gimbal_Ctrl->gimbal_mode = gimbal_zero_force;
 

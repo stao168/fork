@@ -4,13 +4,13 @@
 
 include(${CMAKE_CURRENT_LIST_DIR}/../../modules/module_config.cmake)
 
-# 模块开关(按板型) —— 【阶段1: 只调底盘运动】
-#   云台板:只留 遥控(SBUS) + 板间下发; BMI088/INS/云台&摩擦轮电机先关掉, 减少故障面
+# 模块开关(按板型) —— 【阶段2-B: yaw 单轴开环测电机】
+#   云台板:遥控(SBUS) + 板间下发 + BMI088/INS + MOTOR
+#           gimbal_func.c 里 GD_YAW_ONLY=1 => 只初始化 yaw(GM6020), pitch(DM4310) 不碰
 #   底盘板:四轮全向轮 + 板间接收(无遥控、无 IMU)
-# 后续把模块加回来:
-#   阶段2 云台: MODULES_GIMBAL = OFFLINE REMOTE BMI088 INS MOTOR BOARDCOMM
-#   之后按需加 VISION / REFEREE
-set(MODULES_GIMBAL   OFFLINE REMOTE BOARDCOMM)
+# 后续:
+#   阶段2-C 上速度环/位置环; 之后按需加 VISION / REFEREE
+set(MODULES_GIMBAL   OFFLINE REMOTE BMI088 INS MOTOR BOARDCOMM)
 set(MODULES_CHASSIS  OFFLINE MOTOR BOARDCOMM)
 
 # ── OFFLINE ──

@@ -16,6 +16,11 @@
 #include "tx_api.h"
 #include <math.h>
 
+#if MODULE_INS && MODULE_BMI088
+#include "module_bmi088.h"
+#include "module_ins.h"
+#endif
+
 #define LOG_TAG "app_robot_control"
 #define LOG_LVL LOG_LVL_INFO
 #include "ulog_def.h"
@@ -67,18 +72,31 @@ static void robot_control_task(ULONG thread_input)
         if (shoot_cmd.load_mode == load_burstfire) g2c.flags |= GD_G2C_FLAG_BURST;
         Module_BoardComm_Send((uint8_t *)&g2c, sizeof(g2c));
 
-        /* TODO(debug): 每 500ms 打一次"实收摇杆/开关 + 算出的速度", 查完删。
-         * 重心是 sw 四个原始值 —— 首次上电靠它确认三档开关的真实档位值。 */
-        static uint16_t log_div;
-        if (++log_div >= 250)
+#if MODULE_INS && MODULE_BMI088
+        /* 【阶段2-A 只读传感器】MOTOR 没开, 这里只有读, 不可能动电机。
+         * 手转云台确认三件事: 1) yaw 连续变化不卷绕 2) gyro_z 符号符合右手系 3) 静止时 gyro_z≈0。
+         * 这三条决定了速度环的 feedback_reverse_flag 要不要置 1。
+         * 单位: YawTotalAngle_rad 是 rad(多圈累计); gyro[] 是 rad/s
+         *   (module_bmi088.h 里注释写 "dps" 是错的: BMI088_GYRO_2000_SEN = 2000/32768×π/180
+         *    已经是 rad/s/LSB, 和加速度乘 9.80665 是同一套做法) */
+        static uint16_t imu_log_div;
+        if (++imu_log_div >= 250) /* 任务 2ms × 250 = 500ms */
         {
-            log_div = 0;
-            LOG_I("sw=%d/%d/%d/%d ch1~4=%d/%d/%d/%d | vx=%d vy=%d wz=%d mm/s | mode=%d", Module_Remote_get_channel(5),
-                  Module_Remote_get_channel(6), Module_Remote_get_channel(7), Module_Remote_get_channel(8), Module_Remote_get_channel(1),
-                  Module_Remote_get_channel(2), Module_Remote_get_channel(3), Module_Remote_get_channel(4), (int)(chassis_cmd.vx * 1000.0f),
-                  (int)(chassis_cmd.vy * 1000.0f), (int)(chassis_cmd.wz * 1000.0f), (int)chassis_cmd.chassis_mode);
+            imu_log_div                = 0;
+            const Ins_t           *ins = Module_INS_get();
+            const Bmi088_device_t *imu = Module_BMI088_get_device();
+            if (ins != NULL && imu != NULL)
+            {
+                LOG_I("imu=%d | yaw=%.4frad (%.1fdeg) euler=%.1f/%.1f/%.1fdeg | gyro_z=%.4frad/s | T=%.1fC", ins->initialized,
+                      (double)ins->YawTotalAngle_rad, (double)(ins->YawTotalAngle_rad * 57.295779513f), (double)ins->euler_angle[0],
+                      (double)ins->euler_angle[1], (double)ins->euler_angle[2], (double)imu->gyro[2], (double)imu->temperature);
+            }
+            else
+            {
+                LOG_W("ins/imu not available");
+            }
         }
-
+#endif
         tx_thread_sleep(2);
     }
 }

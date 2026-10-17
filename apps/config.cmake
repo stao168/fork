@@ -9,7 +9,7 @@ if(NOT DEFINED ROBOT)
     set(ROBOT "infantry_guodong") # hero / engineer / infantry3 / infantry4 / infantry5 / infantry_guodong / drone / sentry / darts / customcontrol / target / test
 endif()
 if(NOT DEFINED BOARD)
-    set(BOARD "chassis") # single / gimbal / chassis; sentry has no single_board
+    set(BOARD "gimbal") # single / gimbal / chassis; sentry has no single_board
 endif()
 
 # 板型校验

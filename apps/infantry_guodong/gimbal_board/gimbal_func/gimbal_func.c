@@ -29,8 +29,12 @@
 #define LOG_LVL LOG_LVL_DBG
 #include "ulog_def.h"
 
+/* 【阶段2-B 调试, 用完改回 0】1 = 只初始化 yaw(GM6020), 跳过 pitch(DM4310)。
+ * 理由: DM4310 走 MIT 模式, 使能后 CAN 一断就保持最后一个力矩; 测 yaw 时没必要让它通电。 */
+#define GD_YAW_ONLY 1
+
 static DJI_Motor_t *yaw_motor   = NULL; /* Yaw: GM6020 @ CAN2 */
-static DM_Motor_t  *pitch_motor = NULL; /* Pitch: DM-J4310 @ CAN1 */
+static DM_Motor_t  *pitch_motor = NULL; /* Pitch: DM-J4310 @ CAN1(阶段2-B 不初始化) */
 
 const static Ins_t           *ins        = NULL;
 const static Bmi088_device_t *bmi088_dev = NULL;
@@ -67,8 +71,9 @@ void gimbal_init(void)
                  * 标定增益时若发现跟随有偏差, 先把这一项换成地球系速率。 */
                 .other_angle_feedback_ptr = &ins->YawTotalAngle_rad,
                 .other_speed_feedback_ptr = &bmi088_dev->gyro[2],
-                .angle_PID                = {.Kp = 0.0f}, /* TODO(阶段3):标定 */
-                .speed_PID                = {.Kp = 0.0f}, /* TODO(阶段3):标定 */
+                /* ⚠ MaxOut 必须给: 框架 f_Output_Limit 是无条件限幅, MaxOut=0 时输出恒为 0 */
+                .angle_PID = {.Kp = 0.0f, .MaxOut = TMAX_GM6020}, /* TODO(阶段2-C):标定 */
+                .speed_PID = {.Kp = 0.0f, .MaxOut = TMAX_GM6020}, /* TODO(阶段2-C):标定 */
             },
         .setting_init_config =
             {
@@ -87,6 +92,7 @@ void gimbal_init(void)
         return;
     }
 
+#if !GD_YAW_ONLY
     /* Pitch: DM-J4310, CAN1, CAN ID 2(命令 0x02 / Master ID 0x12),MIT 模式 */
     Motor_Init_Config_s pitch_config = {
         .offline_init_config = {.name = "gd_pitch_4310", .timeout_ms = 100, .beep_times = 3, .enable = 1},
@@ -120,27 +126,45 @@ void gimbal_init(void)
     }
     Motor_DM_Cmd(pitch_motor, DM_CMD_CLEAR_ERROR);
     Motor_DM_Cmd(pitch_motor, DM_CMD_MOTOR_START);
+#endif /* !GD_YAW_ONLY */
 
-    /* 骨架:上电先停住,等闭环实现 */
+    /* 上电先停住, 等上层按模式使能 */
     Motor_Stop((Motor_Base *)yaw_motor);
-    Motor_Stop((Motor_Base *)pitch_motor);
+    Motor_Stop((Motor_Base *)pitch_motor); /* GD_YAW_ONLY 时为 NULL, Motor_Stop 有内建保护 */
 }
 
 /*
- * @brief 云台闭环 —— TODO(阶段3)实现
- *   目标:按 gimbal_cmd->gimbal_mode 分支(zero_force / gyro / auto),
- *        pitch 限位用 PITCH_LIMIT_DOWN_RAD / PITCH_LIMIT_UP_RAD,
- *        前馈用 Motor_SetForwardTorque(&pitch_motor->base, GIMBAL_PITCH_FF_NM),
- *        最后回填 *yaw_ecd = yaw_motor->measure.ecd(供板间夹角)。
- *   当前:仅安全停机。
+ * @brief 云台控制 —— 【阶段2-B: yaw 单轴开环前馈】
+ *   gimbal_cmd->yaw ∈ [-1,1](左摇杆 ch3) → 正比于 GIMBAL_YAW_TEST_TORQUE_NM 的前馈力矩。
+ *   PID 增益仍为 0, 所以下发的是纯前馈: 只看 GM6020 转不转、往哪边转、ecd 反馈对不对。
+ *   *yaw_ecd 用真实编码器上报(阶段1 是写死的对齐常数), 顺便可读出"云台正前方"的 ecd。
+ * TODO(阶段2-C): 恢复角度+速度串级闭环, 按 gimbal_mode 分支, 加 pitch 限位与前馈。
  */
 void gimbal_func(Gimbal_Ctrl_Cmd_t *gimbal_cmd, uint16_t *yaw_ecd)
 {
     if (gimbal_cmd == NULL) return;
-    (void)yaw_ecd;
 
-    if (yaw_motor != NULL) Motor_Stop((Motor_Base *)yaw_motor);
+    if (yaw_motor == NULL)
+    {
+        if (yaw_ecd != NULL) *yaw_ecd = (uint16_t)YAW_CHASSIS_ALIGN_ECD;
+        return;
+    }
+
+    /* 板间夹角用 GM6020 自己的编码器(不是 IMU), 给底盘板做跟随 */
+    if (yaw_ecd != NULL) *yaw_ecd = yaw_motor->measure.ecd;
+
+    Motor_Start((Motor_Base *)yaw_motor);
+    Motor_SetForwardTorque((Motor_Base *)yaw_motor, gimbal_cmd->yaw * GIMBAL_YAW_TEST_TORQUE_NM);
+
     if (pitch_motor != NULL) Motor_Stop((Motor_Base *)pitch_motor);
+
+    static uint16_t log_div;
+    if (++log_div >= 250) /* 2ms × 250 = 500ms */
+    {
+        log_div = 0;
+        LOG_I("yaw ff=%.3fNm | ecd=%d spd=%.2frad/s out=%.3fNm", (double)(gimbal_cmd->yaw * GIMBAL_YAW_TEST_TORQUE_NM), yaw_motor->measure.ecd,
+              (double)yaw_motor->base.measure.speed_rad, (double)yaw_motor->base.controller.output_torque);
+    }
 }
 
 #else /* !GD_GIMBAL_READY —— 阶段1: 云台不参与 */
