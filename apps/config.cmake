@@ -2,8 +2,15 @@
 # 在这里选择机器人和板型；配置文件是构建配置的唯一来源
 
 # 目标机器人 & 板型
-set(ROBOT "target") # hero / engineer / infantry3 / infantry4 / infantry5 / drone / sentry / darts / customcontrol / target / test
-set(BOARD "single") # single / gimbal / chassis; sentry has no single_board
+# ⚠️ 必须用 if(NOT DEFINED ...) 包起来: 直接 set() 会无条件盖掉 -DROBOT/-DBOARD 传进来的
+# cache 变量, 于是出现"命令行改了扇型却仍然构出默认扇型"; 两块板硬件完全相同, 烧错看不出来。
+# 交互式改这里; CI / 多板型构建用 -DROBOT=xxx -DBOARD=xxx 覆盖。
+if(NOT DEFINED ROBOT)
+    set(ROBOT "infantry_guodong") # hero / engineer / infantry3 / infantry4 / infantry5 / infantry_guodong / drone / sentry / darts / customcontrol / target / test
+endif()
+if(NOT DEFINED BOARD)
+    set(BOARD "chassis") # single / gimbal / chassis; sentry has no single_board
+endif()
 
 # 板型校验
 if(NOT BOARD MATCHES "^(single|gimbal|chassis)$")
