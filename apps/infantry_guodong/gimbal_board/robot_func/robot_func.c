@@ -52,10 +52,10 @@ void RemoteControlSet(Chassis_Ctrl_Cmd_t *Chassis_Ctrl, Shoot_Ctrl_Cmd_t *Shoot_
                 Chassis_Ctrl->chassis_mode = chassis_zero_force;
         }
 
-        /* 【阶段2-B 调试, 用完删】左摇杆(ch3) → yaw 开环力矩比例 [-1,1]。
-         * 用 ch3 而不是三档开关: 松手回中自动为 0, 且不碰底盘(ch1/ch2)和底盘模式(CH8)。
-         * gimbal_mode 阶段2-B 不参与判断, 这里保持 zero_force 不误导。 */
-        Gimbal_Ctrl->yaw         = (float)Module_Remote_get_channel(3) * ch_scale;
+        /* 左摇杆左右(ch4) → yaw 目标角增量比例 [-1,1], 由 gimbal_func 累加到目标角。
+         * 符号与步兵三一致(右推 → 目标角变小 → 顺时针); 回中时 sbus 死区保证为 0。
+         * 用 ch4 而不是三档开关: 不影响底盘(ch1/ch2 右摇杆)和底盘模式(CH8)。 */
+        Gimbal_Ctrl->yaw         = -(float)Module_Remote_get_channel(4) * ch_scale;
         Gimbal_Ctrl->pitch       = 0.0f;
         Gimbal_Ctrl->gimbal_mode = gimbal_zero_force;
 

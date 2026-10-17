@@ -30,10 +30,19 @@
 #define GIMBAL_PITCH_STICK_RATE      5.0f      /* Gimbal_LeverSpeedMapRate */
 #define GIMBAL_YAW_PITCH_RATE        1.5f      /* Gimbal_YawPitchSpeedRate */
 #define GIMBAL_PITCH_FF_NM           (-0.85f)  /* 旧 Gimbal.c 常数前馈力矩 (N·m) */
-/* 【阶段2-B 调试, 用完删】yaw 开环力矩测试: 左摇杆(ch3) ±1 → ±这个力矩(N·m)。
- * 框架 Motor_CalculateTorque() = PID输出 + feedforward, 而 yaw 的 Kp 还是 0,
- * 所以给出的就是纯前馈力矩。0.2 N·m ≈ 0.27 A(GM6020), 够看方向又不至于甩起来。 */
-#define GIMBAL_YAW_TEST_TORQUE_NM    0.2f
+/* -- yaw 闭环(角度环串速度环), 增益全部由旧 Gimbal.c 换算 -- */
+/* 角度环: 旧 Kp = 0.55 [输出 rad/s per 度误差]、限幅 15.71 rad/s;
+ * 框架角度环 measure 是 rad ⇒ Kp = 0.55 × (180/π) ≈ 31.5 [rad/s per rad] */
+#define GIMBAL_YAW_ANGLE_KP          31.5f
+#define GIMBAL_YAW_ANGLE_MAX_W       15.71f /* 角度环输出上限(rad/s), 即最大目标角速度 */
+/* 速度环: 旧 Kp = 4000 [raw per rad/s]、限幅 16384 raw = 满电流;
+ * 16384 raw ↔ TMAX_GM6020(2.223 N·m) ⇒ Kp = 4000 × 2.223/16384 ≈ 0.543 [N·m per rad/s] */
+#define GIMBAL_YAW_SPEED_KP          0.543f
+/* 摇杆满杆时【每个控制周期】累加的目标角增量(rad), 照搬旧工程节奏:
+ * LeverSpeedMapRate(5.0) × YawPitchSpeedRate²(1.5²) × (180/4096) = 0.4944 度/周期
+ * ⇒ 0.008628 rad / 2ms ⇒ 满杆约 4.3 rad/s (247°/s)
+ * ⚠ 绑定 2ms 任务周期, 改周期要同步改。 */
+#define GIMBAL_YAW_STICK_STEP_RAD    0.008628f
 
 /* -- 底盘(全向轮; 旧工程文件名叫 Mecanum.c, 但实车是全向轮) -- */
 #define CHASSIS_WHEEL_RADIUS_M       0.081f    /* Mecanum_WheelRadius = 8.1cm */
