@@ -1,0 +1,11 @@
+.\objects\user_lib.o: AHRS\user_lib.c
+.\objects\user_lib.o: AHRS\user_lib.h
+.\objects\user_lib.o: AHRS\struct_typedef.h
+.\objects\user_lib.o: E:\apps\Keil\ARM\ARMCC\Bin\..\include\stdint.h
+.\objects\user_lib.o: AHRS\arm_math.h
+.\objects\user_lib.o: .\Start\core_cm4.h
+.\objects\user_lib.o: .\Start\core_cmInstr.h
+.\objects\user_lib.o: .\Start\core_cmFunc.h
+.\objects\user_lib.o: .\Start\core_cmSimd.h
+.\objects\user_lib.o: E:\apps\Keil\ARM\ARMCC\Bin\..\include\string.h
+.\objects\user_lib.o: E:\apps\Keil\ARM\ARMCC\Bin\..\include\math.h
