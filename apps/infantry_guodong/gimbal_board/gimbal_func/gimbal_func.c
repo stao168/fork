@@ -114,7 +114,7 @@ void gimbal_init(void)
                 /* 速度反馈用 HI04 的 gyro[1](装在俯仰框上, 实测该分量即俯仰角速度);
                  * 角度反馈仍是 DM4310 输出轴编码器(旧工程同款) */
                 .other_speed_feedback_ptr = Module_HI04_get_gyro_ptr() + 1,
-                .angle_PID                = {.Kp = 0.0f, .MaxOut = 12.566f}, /* TODO(阶段4):标定 */
+                .angle_PID                = {.Kp = GIMBAL_PITCH_ANGLE_KP, .MaxOut = GIMBAL_PITCH_ANGLE_MAX_W},
                 .speed_PID                = {.Kp            = GIMBAL_PITCH_SPEED_KP,
                                              .Ki            = GIMBAL_PITCH_SPEED_KI,
                                              .MaxOut        = TMAX_DM4310,
@@ -124,7 +124,7 @@ void gimbal_init(void)
         .setting_init_config =
             {
                 .algorithm_type        = CONTROL_PID,
-                .loop_type             = SPEED_LOOP, /* 阶段3: 只速度环; 角度环在阶段4 */
+                .loop_type             = ANGLE_AND_SPEED_LOOP, /* 阶段4: 角度环串速度环 */
                 .angle_feedback_source = 0,
                 .speed_feedback_source = 1, /* HI04 gyro[1](500Hz + 串口延迟);
                                              * 改回 0 则用 DM4310 自带 Speed(延迟低但噪声大) */
@@ -207,28 +207,24 @@ void gimbal_func(Gimbal_Ctrl_Cmd_t *gimbal_cmd, uint16_t *yaw_ecd)
             const float        out  = pitch_motor->base.controller.output_torque;
             static uint16_t    blk_cnt;
 
-            /* 目标速度显式限幅 */
-            float pitch_ref = gimbal_cmd->pitch * GIMBAL_PITCH_TEST_W_MAX;
-            VAL_LIMIT(pitch_ref, -GIMBAL_PITCH_TEST_W_MAX, GIMBAL_PITCH_TEST_W_MAX);
+            /* ---- 【阶段4 角度环】摇杆累加目标角, 目标角直接夹在限位里(旧 Gimbal.c 同款) ---- */
+            static float   pitch_target_rad;
+            static uint8_t pitch_target_inited;
 
-            /* ---- 软限位: 照旧工程 PitchDownLimt/PitchUpLimt, 作用在绝对角上 ----
-             * 旧工程: Target 夹在 [-1.45, -0.72]; 角度【减小 = 抬头】。
-             * 本车 total_angle 零位可能和旧工程差一个偏置, 用 PITCH_ANGLE_OFFSET_RAD 对齐。
-             * ⚠ 只在"当前已在范围内"时才拦越界方向: 万一把偏置填错(一开始就在范围外),
-             *    也不会把云台锁死, 仍然可以往反方向退出来。 */
-            const float ang    = pitch_motor->base.measure.total_angle + PITCH_ANGLE_OFFSET_RAD;
-            const float margin = 0.02f; /* 提前一点停, 留机械余量 */
-            if (ang <= PITCH_LIMIT_DOWN_RAD && ang >= PITCH_LIMIT_UP_RAD)
+            if (!pitch_target_inited)
             {
-                if (pitch_ref < 0.0f && ang <= PITCH_LIMIT_UP_RAD + margin) pitch_ref = 0.0f;   /* 到上限位, 不许再抬 */
-                if (pitch_ref > 0.0f && ang >= PITCH_LIMIT_DOWN_RAD - margin) pitch_ref = 0.0f; /* 到下限位, 不许再压 */
+                /* 第一次用当前角度初始化, 避免目标与实测差很多时云台猛甩 */
+                pitch_target_rad    = pitch_motor->base.measure.total_angle;
+                pitch_target_inited = 1;
             }
+            pitch_target_rad += GIMBAL_PITCH_STICK_STEP_RAD * gimbal_cmd->pitch;
 
-            /* 堵转 / 撞机械限位保护。
-             * 不用绝对角度限位: PITCH_LIMIT_*_RAD 是旧车 DM4310 的绝对角, 和本车零位差一个
-             * 未标定的偏置, 直接拿来判反而会把云台推进限位里。
-             * 这个判断不依赖任何标定: “想让动 + 力矩很大 + 却转不动” 持续 100ms 就是撞住了。 */
-            if (fabsf(pitch_ref) > 0.5f && fabsf(spd) < 0.15f && fabsf(out) > 0.5f * TMAX_DM4310)
+            /* 限位: 旧工程把 Target 夹在 [-1.45, -0.72]; 用车上的 total_angle 时要减掉标定偏置 */
+            VAL_LIMIT(pitch_target_rad, PITCH_LIMIT_UP_RAD - PITCH_ANGLE_OFFSET_RAD, PITCH_LIMIT_DOWN_RAD - PITCH_ANGLE_OFFSET_RAD);
+
+            /* 堵转 / 撞机械限位保护: 角度环会持续出力试图到位, 卡住时表现为 "力矩很大却没转速"。
+             * 不需要 ref 判断 —— 静止时输出只有前馈(-0.85), 远小于 0.5*TMAX, 不会误触发。 */
+            if (fabsf(spd) < 0.15f && fabsf(out) > 0.5f * TMAX_DM4310)
             {
                 if (++blk_cnt >= 50) /* 2ms × 50 = 100ms */
                 {
@@ -246,9 +242,8 @@ void gimbal_func(Gimbal_Ctrl_Cmd_t *gimbal_cmd, uint16_t *yaw_ecd)
             }
 
             Motor_Start((Motor_Base *)pitch_motor);
-            Motor_SetRef((Motor_Base *)pitch_motor, pitch_ref);
-            /* 重力前馈: 旧工程常数 -0.85 N·m。速度环只负责"追转速", 枪管+俯仰框的
-             * 静态重力矩全靠这一项扛 —— 没有它, 小 Kp 时会被表现成"有劲但抬不起来/撑不住"。
+            Motor_SetRef((Motor_Base *)pitch_motor, pitch_target_rad); /* 角度环 ref = 目标角(rad) */
+            /* 重力前馈: 旧工程常数 -0.85 N·m, 减轻速度环和积分的负担。
              * ⚠ 符号按实车确认: 加上后若云台掉得更快, 把 GIMBAL_PITCH_FF_NM 取反。 */
             Motor_SetForwardTorque((Motor_Base *)pitch_motor, GIMBAL_PITCH_FF_NM);
         }
@@ -259,11 +254,11 @@ void gimbal_func(Gimbal_Ctrl_Cmd_t *gimbal_cmd, uint16_t *yaw_ecd)
     {
         log_div                 = 0;
         const Hi04_Data_t *hi04 = Module_HI04_get();
-        LOG_I("yaw tgt=%.2f ref=%.2f spd=%.2f out=%.2f | pitch ref=%.2f spd=%.2f out=%.2f ang=%.2f r=%.1f%s", (double)yaw_target_rad,
+        LOG_I("yaw tgt=%.2f ref=%.2f spd=%.2f out=%.2f | pitch tgt=%.2f ang=%.2f spd=%.2f out=%.2f r=%.1f%s", (double)yaw_target_rad,
               (double)yaw_motor->base.controller.angle_PID.Output, (double)bmi088_dev->gyro[2], (double)yaw_motor->base.controller.output_torque,
-              (double)(gimbal_cmd->pitch * GIMBAL_PITCH_TEST_W_MAX), hi04 ? (double)hi04->gyro_rad_s[1] : 0.0,
-              (pitch_motor != NULL) ? (double)pitch_motor->base.controller.output_torque : 0.0,
-              (pitch_motor != NULL) ? (double)pitch_motor->base.measure.total_angle : 0.0, hi04 ? (double)hi04->roll_deg : 0.0,
+              (pitch_motor != NULL) ? (double)pitch_motor->base.controller.ref : 0.0,
+              (pitch_motor != NULL) ? (double)pitch_motor->base.measure.total_angle : 0.0, hi04 ? (double)hi04->gyro_rad_s[1] : 0.0,
+              (pitch_motor != NULL) ? (double)pitch_motor->base.controller.output_torque : 0.0, hi04 ? (double)hi04->roll_deg : 0.0,
               (hi04 != NULL) ? "" : " [HI04 LOST]");
     }
 }

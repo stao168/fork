@@ -53,8 +53,14 @@
  * 加一点积分把最后的静差吃掉, 动作会连续很多。延迟大的反馈源上 Ki 不能给多。 */
 #define GIMBAL_PITCH_SPEED_KI        0.05f
 #define GIMBAL_PITCH_INTEGRAL_LIMIT  2.0f
-/* 摇杆满杆对应的 pitch 目标角速度(rad/s)。测方向先给 3.0, 别让云台撞机械限位 */
+/* 摇杆满杆对应的 pitch 目标角速度(rad/s)。阶段3(只速度环)用, 上角度环后改用累加目标角 */
 #define GIMBAL_PITCH_TEST_W_MAX      3.0f
+/* 角度环: 旧 Gimbal.c Kp=45 [rad/s per rad]、限幅 12.566(=4π rad/s)。口径一致, 直接照搬。 */
+#define GIMBAL_PITCH_ANGLE_KP        45.0f
+#define GIMBAL_PITCH_ANGLE_MAX_W     12.566f
+/* 摇杆满杆时【每个周期】累加的目标角增量(rad)。旧工程 Gimbal_PitchLeverSpeedMapRate = 0.0015,
+ * 且不看摇杆幅度; 我们乘上归一化值, 满杆 0.0015 rad/2ms = 0.75 rad/s(43°/s), 走完行程约 1.2s。 */
+#define GIMBAL_PITCH_STICK_STEP_RAD  0.0015f
 /* 【限位标定】DM4310 的 measure.total_angle + 这个偏置 = 旧工程 PitchDownLimt/PitchUpLimt
  * 用的绝对角。旧车范围是 -0.72(低头) ~ -1.45(抬头); 本车先看日志 ang= 实测再填。 */
 #define PITCH_ANGLE_OFFSET_RAD       0.0f
