@@ -57,10 +57,14 @@
 
 **底盘关键参数**
 - 底盘是**全向轮**:轮子 ±45°、**40cm × 40cm 正方轮距**(旧工程文件名叫 `Mecanum.c`, 但实车不是麦轮)
-- 逆解用 **app 层自己的 `chassis_xdrive_calc`(切向 X 型)**, **不要**用框架的 `Chassis_Omni_Calc`:
-  后者是径向布局(自转项 `wz*(a-b)`), 正方轮距下四轮 ω 项全抵消 ⇒ **自转恒为 0**;
-  切向布局的自转项是 `wz*(a+b)`, 四轮**同号** ⇒ 能自转。旧工程 `Mecanum.c` 的四项与切向 X 型标准逆解逐项一致(只是文件名误导)
-- 轮序(LF/RF/RR/LR)与旧发帧字节序一致: `M3508_CAN1SetLIDCurrent(LF, RF, RR, LR)`, 即 tx_id 1/2/3/4
+- 逆解统一用**模块层 `Chassis_Omni_Calc`**(`modules/algorithm/chassis_type.c`): 切向 X 型布局,
+  自转项 `vw*chassis_radius`(`chassis_radius = √((x/2)²+(y/2)²) = 0.2828 m`), 四轮**同号** ⇒ 能自转。
+  (模块层早期是径向布局 `vw*(a-b)`, 正方轮距下自转恒为 0, 已改掉; 旧工程 `Mecanum.c` 的四项与切向 X 型标准逆解逐项一致)
+- ⚠️ 轮序见上: `chassis_motors` 是 `[LF, LR, RR, RF]`, 和模块层一致, 不需要重排
+- 轮序: `chassis_motors = [LF, LR, RR, RF]`, 直接对齐模块层 `Chassis_Omni_Calc`, 所以初始化时写的 tx_id 是 **1/4/3/2**。
+  每个轮子自己的 tx_id 没变(LF=1 RF=2 RR=3 LR=4), 只是数组下标顺序变了。
+  在线位图 `wheels=0x..` 的位序是 bit0=LF bit1=LR bit2=RR bit3=RF; 蜂鸣次数仍按轮位(LF=1 RF=2 RR=3 LR=4)
+- ⚠️ 正解 `Chassis_Omni_Fwd` 仍是旧的径向公式(`a-b`、vw 组合有 bug), 尚未同步, 不要用于里程计
 - 几何:轮半径 `8.1 cm`、半距 `a = b = 20 cm`
 - ⚠️ 切向 X 型下"前进"**不是四轮同向**: 纯 vx 时 LF/LR 反转、RF/RR 正转 —— 这是正常的, 别去"修"
 - 旧增益:四轮速度 Kp `11.8`(限幅 ±15000,**RPM 量纲**)、跟随 Kp `0.004`(限幅 2/5)、拨盘速度 Kp `5.0`(限幅 ±10000,**RPM 量纲**)

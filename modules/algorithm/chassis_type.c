@@ -123,20 +123,17 @@ void Chassis_Mecanum_Calc(DJI_Motor_t *motors[4], const Chassis_Diff_Config_s *c
 
 void Chassis_Omni_Calc(DJI_Motor_t *motors[4], const Chassis_Diff_Config_s *cfg, float vx, float vy, float vw)
 {
-    const float a            = cfg->wheel_base_x / 2.0f;
-    const float b            = cfg->wheel_base_y / 2.0f;
-    const float rot_diff     = vw * (a - b);
-    const float speed_factor = cfg->decele_ratio / (cfg->wheel_radius * SQRT2_2);
+    const float speed_factor = cfg->decele_ratio / cfg->wheel_radius ;
+    float radius = cfg->chassis_radius;
 
     float wheel_speed[4];
-    wheel_speed[0] = (+vx + vy + rot_diff) * speed_factor;
-    wheel_speed[3] = (+vx - vy - rot_diff) * speed_factor;
-    wheel_speed[1] = (-vx + vy - rot_diff) * speed_factor;
-    wheel_speed[2] = (-vx - vy + rot_diff) * speed_factor;
+    wheel_speed[0] = ((-vx * SQRT2_2  + vy * SQRT2_2) + vw * radius)*speed_factor;
+    wheel_speed[1] = ((-vx * SQRT2_2  - vy * SQRT2_2) + vw * radius)*speed_factor;
+    wheel_speed[2] = ((vx * SQRT2_2  - vy * SQRT2_2) + vw * radius)*speed_factor;
+    wheel_speed[3] = ((vx * SQRT2_2  + vy * SQRT2_2) + vw * radius)*speed_factor;
 
     for (int i = 0; i < 4; i++) Motor_SetRef((Motor_Base *)motors[i], wheel_speed[i]);
 }
-
 
 Chassis_Velocity_s Chassis_Swerve_Fwd(const DJI_Motor_t *motors[8], const Chassis_Swerve_Config_s *cfg)
 {

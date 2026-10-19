@@ -61,12 +61,13 @@
 
 /* -- 底盘(全向轮; 旧工程文件名叫 Mecanum.c, 但实车是全向轮) -- */
 #define CHASSIS_WHEEL_RADIUS_M       0.081f    /* Mecanum_WheelRadius = 8.1cm */
-/* 实车: 40cm × 40cm 正方轮距, 轮子 ±45°。
- * 逆解用 app 层自己的 chassis_xdrive_calc(切向 X 型, 自转项 = wz*(a+b) 四轮同号),
- * 【不用】框架的 Chassis_Omni_Calc —— 那是径向布局(自转项 wz*(a-b)), 正方轮距下自转恒为 0。
- * 下面两个值只当“半距”用: a = x/2、b = y/2。 */
+/* 实车: 40cm × 40cm 正方轮距, 轮子 ±45° 【切向 X 型】布局。
+ * 逆解统一用模块层 Chassis_Omni_Calc(自转项 vw*chassis_radius, 四轮同号), 见 modules/algorithm/chassis_type.c */
 #define CHASSIS_WHEEL_BASE_X_M       0.40f     /* 前后轮距 (m) */
 #define CHASSIS_WHEEL_BASE_Y_M       0.40f     /* 左右轮距 (m) */
+/* 轮子中心到几何中心的距离 = √((x/2)²+(y/2)²) = √(0.2²+0.2²) = 0.2828 m。
+ * 正方轮距时它等于 (a+b)*0.7071, 也就是切向布局逆解里的自转力臂。 */
+#define CHASSIS_RADIUS_M             0.2828f
 /* ⚠️ 15.7647 = 268/17, 是旧 M3508.h 里的【实车】值; 旧工程同时还留着标准齿箱的 3591/187 ≈ 19.203。
  * 它同时决定麦轮逆解系数和转矩常数, 上台架前必须实测确认实车用的是哪套齿箱。 */
 #define CHASSIS_GEAR_RATIO           15.7647f

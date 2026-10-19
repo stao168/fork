@@ -6,21 +6,15 @@
  *   电机 ID: 1=LF(左前) 2=RF(右前) 3=RR(右后) 4=LR(左后), 全在 CAN1
  *   逆解   : 输出【转子 RPM】,旧工程再用 PID 追 RotorSpeed
  *
- * !! 关于逆解公式(重要):
- *   文件名虽然叫 Mecanum.c, 但实车是【全向轮】(轮子 ±45°, 40cm×40cm 正方轮距)。
- *   45° 全向轮有两种布局, 旧工程和框架的 Chassis_Omni_Calc 不是同一种:
- *     切向布局(旧工程, 也是本文件用的) : 自转项 wz*(a+b), 四轮【同号】 -> 能自转
- *     径向布局(框架 Chassis_Omni_Calc)  : 自转项 wz*(a-b), 四轮符号交替
- *                                        -> 正方轮距下 a-b≡0, 四轮 ω 项全抵消, 自转恒为 0
- *   旧工程公式四项我逐项验算过, 就是切向 X 型的标准逆解(力平衡能对上), 而且旧车
- *   确实有小陀螺功能 —— 所以本车是切向布局, 用本文件的 chassis_xdrive_calc。
- *   ⚠ 架空实测时若发现"推前进变成原地自转", 那就是径向布局, 换回 Chassis_Omni_Calc。
+ * !! 逆运动学: 统一用模块层 modules/algorithm/chassis_type.c 的 Chassis_Omni_Calc。
+ *   本车是切向 X 型布局(轮子 ±45°, 40cm×40cm), 自转项 vw*chassis_radius 四轮同号。
  *
- * !! 轮序: 本文件数组顺序 = [LF, RF, RR, LR], 与旧工程 Chassis_* 命名一一对应
- *   (所以 chassis_init 里就是 tx_id 1/2/3/4 按序)。因为已经不用框架的麦轮/全向轮
- *   逆解了, 这里【故意不采用】框架文档里 [LF, LB, RB, RF] 那套顺序, 以免两边混淆。
+ * !! 轮序: chassis_motors = [LF, LR, RR, RF], 直接对齐模块层 Chassis_Omni_Calc 的数组顺序,
+ *   所以初始化时写的 tx_id 是 1/4/3/2(不是 1/2/3/4 按序) —— 每个轮子自己的 tx_id 没变,
+ *   只是数组下标顺序变了。在线位图 wheels=0x.. 和日志也按这个位序解读。
  */
 #include "chassis_func.h"
+#include "chassis_type.h"
 #include "module_offline.h"
 #include "motor_dji.h"
 #include "user_lib.h"
@@ -30,7 +24,16 @@
 #define LOG_LVL LOG_LVL_DBG
 #include "ulog_def.h"
 
-static DJI_Motor_t *chassis_motors[4]; /* [LF, RF, RR, LR] */
+static DJI_Motor_t *chassis_motors[4]; /* [LF, LR, RR, RF] —— 与模块层 Chassis_Omni_Calc 的轮序一致 */
+
+/* 模块层逆解用的几何参数 */
+static const Chassis_Diff_Config_s chassis_omni_cfg = {
+    .wheel_base_x   = CHASSIS_WHEEL_BASE_X_M,
+    .wheel_base_y   = CHASSIS_WHEEL_BASE_Y_M,
+    .chassis_radius = CHASSIS_RADIUS_M,
+    .wheel_radius   = CHASSIS_WHEEL_RADIUS_M,
+    .decele_ratio   = CHASSIS_GEAR_RATIO,
+};
 
 void chassis_init(void)
 {
@@ -74,10 +77,11 @@ void chassis_init(void)
         return;
     }
 
-    /* [1] RF(右前) = tx_id 2 */
-    cfg.transport_config.can.tx_id     = 2;
-    cfg.offline_init_config.name       = "gd_wheel_rf";
-    cfg.offline_init_config.beep_times = 2;
+    /* [1] LR(左后) = tx_id 4。数组顺序对齐 Chassis_Omni_Calc 的 [LF, LR, RR, RF], 所以是 1/4/3/2;
+     * 蜂鸣次数仍按【轮位】给(LF=1 RF=2 RR=3 LR=4), 和报警名单一致 */
+    cfg.transport_config.can.tx_id     = 4;
+    cfg.offline_init_config.name       = "gd_wheel_lr";
+    cfg.offline_init_config.beep_times = 4;
     chassis_motors[1]                  = Motor_DJI_Init(&cfg);
 
     /* [2] RR(右后) = tx_id 3 */
@@ -86,10 +90,10 @@ void chassis_init(void)
     cfg.offline_init_config.beep_times = 3;
     chassis_motors[2]                  = Motor_DJI_Init(&cfg);
 
-    /* [3] LR(左后) = tx_id 4 */
-    cfg.transport_config.can.tx_id     = 4;
-    cfg.offline_init_config.name       = "gd_wheel_lr";
-    cfg.offline_init_config.beep_times = 4;
+    /* [3] RF(右前) = tx_id 2 */
+    cfg.transport_config.can.tx_id     = 2;
+    cfg.offline_init_config.name       = "gd_wheel_rf";
+    cfg.offline_init_config.beep_times = 2;
     chassis_motors[3]                  = Motor_DJI_Init(&cfg);
 
     for (int i = 0; i < 4; i++)
@@ -120,7 +124,8 @@ static uint8_t chassis_all_online(void)
     return 1;
 }
 
-/* 4 个轮子的在线位图(bit0=LF, bit1=RF, bit2=RR, bit3=LR), 仅用于调试打印 */
+/* 4 个轮子的在线位图(bit0=LF, bit1=LR, bit2=RR, bit3=RF), 仅用于调试打印。
+ * 位序跟 chassis_motors 走 = 模块层 Chassis_Omni_Calc 的轮序 */
 uint8_t Chassis_Get_OnlineMask(void)
 {
     uint8_t mask = 0;
@@ -133,34 +138,10 @@ uint8_t Chassis_Get_OnlineMask(void)
 }
 
 /*
- * @brief 切向 X 型全向轮逆解(本车用这个, 不用框架的 Chassis_Omni_Calc)
- * @note  两个 45° 全向轮布局的自转项完全不同: 切向是 wz*(a+b) 四轮同号, 径向是
- *        wz*(a-b) 四轮交替。本车是切向(40cm 正方轮距), 所以能自转。
- *        四项与旧工程 CarBody/Mecanum.c 逐项一致。
- * @param vx/vy  底盘系速度 (m/s)
- * @param wz     自转角速度 (rad/s)
- * 输出: 直接 Motor_SetRef, 单位【转子 rad/s】(框架电机闭环 ref 的口径)
+ * @brief 全向轮逆解后下发到四个电机
+ * @note  chassis_motors 的顺序已经是模块层 Chassis_Omni_Calc 要求的 [LF, LR, RR, RF], 直接传
  */
-static void chassis_xdrive_calc(float vx, float vy, float wz)
-{
-    const float a = CHASSIS_WHEEL_BASE_X_M / 2.0f; /* 前后半距 */
-    const float b = CHASSIS_WHEEL_BASE_Y_M / 2.0f; /* 左右半距 */
-
-    const float rot = wz * (a + b); /* 四轮同号 */
-    /* 45° 全向轮的轮面线速度 = 括号项 × 0.7071(投影到轮面方向, 旧 Mecanum_InverseMotionControl 同款)。
-     * ⚠ 不能写 /(r*0.7071): 那是 ×1.4142, 所有轮速指令会大 2 倍 —— 斜推满杆要 11000 RPM、
-     *   小陀螺+满杆要 13000 RPM, 都超过 M3508 空载(≈9000 RPM), 电机饱和后车不按预期走。 */
-    const float speed_factor = CHASSIS_GEAR_RATIO * 0.70710678f / CHASSIS_WHEEL_RADIUS_M;
-
-    /* 数组顺序 = [LF, RF, RR, LR] */
-    float wheel_speed[4];
-    wheel_speed[0] = (-vx + vy + rot) * speed_factor; /* LF */
-    wheel_speed[1] = (+vx + vy + rot) * speed_factor; /* RF */
-    wheel_speed[2] = (+vx - vy + rot) * speed_factor; /* RR */
-    wheel_speed[3] = (-vx - vy + rot) * speed_factor; /* LR */
-
-    for (int i = 0; i < 4; i++) Motor_SetRef((Motor_Base *)chassis_motors[i], wheel_speed[i]);
-}
+static void chassis_omni_calc(float vx, float vy, float wz) { Chassis_Omni_Calc(chassis_motors, &chassis_omni_cfg, vx, vy, wz); }
 
 void chassis_func(Chassis_Ctrl_Cmd_t *chassis_cmd)
 {
@@ -185,7 +166,8 @@ void chassis_func(Chassis_Ctrl_Cmd_t *chassis_cmd)
         chassis_wz = -CHASSIS_SPIN_W_RAD_S;
         break;
     case chassis_follow_gimbal_yaw: // 跟随云台
-        chassis_wz = 0.0f;              /* TODO(阶段2): PIDCalculate(&chassis_follow_pid, -chassis_cmd->offset_angle, 0); chassis_wz = chassis_follow_pid.Output; */
+        chassis_wz =
+            0.0f; /* TODO(阶段2): PIDCalculate(&chassis_follow_pid, -chassis_cmd->offset_angle, 0); chassis_wz = chassis_follow_pid.Output; */
         break;
     default:
         chassis_wz = 0.0f;
@@ -199,5 +181,5 @@ void chassis_func(Chassis_Ctrl_Cmd_t *chassis_cmd)
     float chassis_vx      = chassis_cmd->vx * cos_theta - chassis_cmd->vy * sin_theta;
     float chassis_vy      = chassis_cmd->vx * sin_theta + chassis_cmd->vy * cos_theta;
 
-    chassis_xdrive_calc(chassis_vx, chassis_vy, chassis_wz);
+    chassis_omni_calc(chassis_vx, chassis_vy, chassis_wz);
 }
