@@ -11,15 +11,19 @@
  */
 #include "gimbal_func.h"
 
+#include "user_lib.h" /* VAL_LIMIT */
+
+#include <math.h>
 #include <stddef.h>
 
-/* 云台闭环需要 INS(姿态) + BMI088(角速度) + MOTOR(电机) 三者同时在位;
- * 阶段1 只调底盘时三者都关着, 本文件退化成文件末尾的空实现。 */
-#define GD_GIMBAL_READY (MODULE_MOTOR && MODULE_INS && MODULE_BMI088)
+/* 云台闭环需要 INS(姿态) + BMI088(角速度) + HI04(pitch 角速度) + MOTOR(电机) 同时到位;
+ * 都关着时本文件退化成文件末尾的空实现。 */
+#define GD_GIMBAL_READY (MODULE_MOTOR && MODULE_INS && MODULE_BMI088 && MODULE_HI04)
 
 #if GD_GIMBAL_READY
 
 #include "module_bmi088.h"
+#include "module_hi04.h"
 #include "module_ins.h"
 #include "module_offline.h"
 #include "motor_damiao.h"
@@ -29,9 +33,9 @@
 #define LOG_LVL LOG_LVL_DBG
 #include "ulog_def.h"
 
-/* 1 = 只初始化 yaw(GM6020), 跳过 pitch(DM4310)。pitch 还没调, 先不让它通电:
- * DM4310 走 MIT 模式, 使能后 CAN 一断就保持最后一个力矩。调 pitch 时改回 0。 */
-#define GD_YAW_ONLY 1
+/* 1 = 只初始化 yaw(GM6020), 跳过 pitch(DM4310)。现在两个轴都要调, 保持 0;
+ * 只调 yaw 时临时改 1 可以避免 DM4310 通电(MIT 模式使能后 CAN 一断会保持力矩)。 */
+#define GD_YAW_ONLY 0
 
 static DJI_Motor_t *yaw_motor   = NULL; /* Yaw: GM6020 @ CAN2 */
 static DM_Motor_t  *pitch_motor = NULL; /* Pitch: DM-J4310 @ CAN1(阶段2-B 不初始化) */
@@ -107,17 +111,25 @@ void gimbal_init(void)
             },
         .controller_init_config =
             {
-                .angle_PID = {.Kp = 0.0f}, /* TODO(阶段3):标定 */
-                .speed_PID = {.Kp = 0.0f}, /* TODO(阶段3):标定 */
+                /* 速度反馈用 HI04 的 gyro[1](装在俯仰框上, 实测该分量即俯仰角速度);
+                 * 角度反馈仍是 DM4310 输出轴编码器(旧工程同款) */
+                .other_speed_feedback_ptr = Module_HI04_get_gyro_ptr() + 1,
+                .angle_PID                = {.Kp = 0.0f, .MaxOut = 12.566f}, /* TODO(阶段4):标定 */
+                .speed_PID                = {.Kp            = GIMBAL_PITCH_SPEED_KP,
+                                             .Ki            = GIMBAL_PITCH_SPEED_KI,
+                                             .MaxOut        = TMAX_DM4310,
+                                             .IntegralLimit = GIMBAL_PITCH_INTEGRAL_LIMIT,
+                                             .Improve       = PID_Integral_Limit},
             },
         .setting_init_config =
             {
                 .algorithm_type        = CONTROL_PID,
-                .loop_type             = ANGLE_AND_SPEED_LOOP,
+                .loop_type             = SPEED_LOOP, /* 阶段3: 只速度环; 角度环在阶段4 */
                 .angle_feedback_source = 0,
-                .speed_feedback_source = 0,
-                .feedback_reverse_flag = 0, /* TODO(阶段1):按实车确认 */
-                .motor_reverse_flag    = 0, /* TODO(阶段1):按实车确认 */
+                .speed_feedback_source = 1, /* HI04 gyro[1](500Hz + 串口延迟);
+                                             * 改回 0 则用 DM4310 自带 Speed(延迟低但噪声大) */
+                .feedback_reverse_flag = 0, /* TODO(阶段3):按实测确认(HI04 方向) */
+                .motor_reverse_flag    = 0, /* TODO(阶段3):按实测确认 */
             },
         .motor_init_info = {.motor_type = DM4310, .gear_ratio = 10, .max_torque = TMAX_DM4310, .torque_constant = KT_DM4310}};
     pitch_motor = Motor_DM_Init(&pitch_config, DM_MIT_MODE);
@@ -179,15 +191,80 @@ void gimbal_func(Gimbal_Ctrl_Cmd_t *gimbal_cmd, uint16_t *yaw_ecd)
     Motor_Start((Motor_Base *)yaw_motor);
     Motor_SetRef((Motor_Base *)yaw_motor, yaw_target_rad); /* 角度环 ref = 目标角(rad) */
 
-    if (pitch_motor != NULL) Motor_Stop((Motor_Base *)pitch_motor);
+    /* ---- pitch: 速度环, 速度反馈 = HI04 gyro[1](装在俯仰框上) ---- */
+    if (pitch_motor != NULL)
+    {
+        if (Module_HI04_get() == NULL)
+        {
+            /* HI04 没数据/掉线: 没有速度反馈就不能闭速度环, 直接断力
+             * (否则 gyro 卡在旧值, PID 会一直满力矩推下去) */
+            Motor_Stop((Motor_Base *)pitch_motor);
+        }
+        else
+        {
+            const Hi04_Data_t *hi04 = Module_HI04_get();
+            const float        spd  = hi04->gyro_rad_s[1];
+            const float        out  = pitch_motor->base.controller.output_torque;
+            static uint16_t    blk_cnt;
+
+            /* 目标速度显式限幅 */
+            float pitch_ref = gimbal_cmd->pitch * GIMBAL_PITCH_TEST_W_MAX;
+            VAL_LIMIT(pitch_ref, -GIMBAL_PITCH_TEST_W_MAX, GIMBAL_PITCH_TEST_W_MAX);
+
+            /* ---- 软限位: 照旧工程 PitchDownLimt/PitchUpLimt, 作用在绝对角上 ----
+             * 旧工程: Target 夹在 [-1.45, -0.72]; 角度【减小 = 抬头】。
+             * 本车 total_angle 零位可能和旧工程差一个偏置, 用 PITCH_ANGLE_OFFSET_RAD 对齐。
+             * ⚠ 只在"当前已在范围内"时才拦越界方向: 万一把偏置填错(一开始就在范围外),
+             *    也不会把云台锁死, 仍然可以往反方向退出来。 */
+            const float ang    = pitch_motor->base.measure.total_angle + PITCH_ANGLE_OFFSET_RAD;
+            const float margin = 0.02f; /* 提前一点停, 留机械余量 */
+            if (ang <= PITCH_LIMIT_DOWN_RAD && ang >= PITCH_LIMIT_UP_RAD)
+            {
+                if (pitch_ref < 0.0f && ang <= PITCH_LIMIT_UP_RAD + margin) pitch_ref = 0.0f;   /* 到上限位, 不许再抬 */
+                if (pitch_ref > 0.0f && ang >= PITCH_LIMIT_DOWN_RAD - margin) pitch_ref = 0.0f; /* 到下限位, 不许再压 */
+            }
+
+            /* 堵转 / 撞机械限位保护。
+             * 不用绝对角度限位: PITCH_LIMIT_*_RAD 是旧车 DM4310 的绝对角, 和本车零位差一个
+             * 未标定的偏置, 直接拿来判反而会把云台推进限位里。
+             * 这个判断不依赖任何标定: “想让动 + 力矩很大 + 却转不动” 持续 100ms 就是撞住了。 */
+            if (fabsf(pitch_ref) > 0.5f && fabsf(spd) < 0.15f && fabsf(out) > 0.5f * TMAX_DM4310)
+            {
+                if (++blk_cnt >= 50) /* 2ms × 50 = 100ms */
+                {
+                    blk_cnt = 0;
+                    /* 先清前馈再停, 否则停机后前馈还在, 会被推着又撞一次 */
+                    Motor_SetForwardTorque((Motor_Base *)pitch_motor, 0.0f);
+                    Motor_Stop((Motor_Base *)pitch_motor);
+                    LOG_W("pitch blocked (limit hit?), force stop");
+                    return;
+                }
+            }
+            else
+            {
+                blk_cnt = 0;
+            }
+
+            Motor_Start((Motor_Base *)pitch_motor);
+            Motor_SetRef((Motor_Base *)pitch_motor, pitch_ref);
+            /* 重力前馈: 旧工程常数 -0.85 N·m。速度环只负责"追转速", 枪管+俯仰框的
+             * 静态重力矩全靠这一项扛 —— 没有它, 小 Kp 时会被表现成"有劲但抬不起来/撑不住"。
+             * ⚠ 符号按实车确认: 加上后若云台掉得更快, 把 GIMBAL_PITCH_FF_NM 取反。 */
+            Motor_SetForwardTorque((Motor_Base *)pitch_motor, GIMBAL_PITCH_FF_NM);
+        }
+    }
 
     static uint16_t log_div;
     if (++log_div >= 250) /* 2ms × 250 = 500ms */
     {
-        log_div = 0;
-        LOG_I("yaw tgt=%.2f ref_w=%.2f spd=%.2f rad/s | out=%.3fNm | ecd=%d | imu=%.2frad", (double)yaw_target_rad,
+        log_div                 = 0;
+        const Hi04_Data_t *hi04 = Module_HI04_get();
+        LOG_I("yaw tgt=%.2f ref=%.2f spd=%.2f out=%.2f | pitch ref=%.2f spd=%.2f out=%.2f ang=%.2f r=%.1f%s", (double)yaw_target_rad,
               (double)yaw_motor->base.controller.angle_PID.Output, (double)bmi088_dev->gyro[2], (double)yaw_motor->base.controller.output_torque,
-              yaw_motor->measure.ecd, (double)ins->YawTotalAngle_rad);
+              (double)(gimbal_cmd->pitch * GIMBAL_PITCH_TEST_W_MAX), hi04 ? (double)hi04->gyro_rad_s[1] : 0.0,
+              (pitch_motor != NULL) ? (double)pitch_motor->base.controller.output_torque : 0.0,
+              (pitch_motor != NULL) ? (double)pitch_motor->base.measure.total_angle : 0.0, hi04 ? (double)hi04->roll_deg : 0.0,
+              (hi04 != NULL) ? "" : " [HI04 LOST]");
     }
 }
 

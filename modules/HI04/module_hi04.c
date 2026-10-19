@@ -31,6 +31,7 @@ static uint8_t hi04_dma_buf[1024];
 static UART_Device *hi04_uart = NULL;
 static hipnuc_raw_t hi04_decoder;
 static Hi04_Data_t  hi04_data;
+static uint32_t     hi04_last_frame_ms; /* 最近一帧的时刻, 用于掉线检测 */
 
 static TX_THREAD                  hi04_thread;
 APPS_STACK_SECTION static uint8_t hi04_thread_stack[HI04_TASK_STACK_SIZE];
@@ -58,6 +59,7 @@ static void hi04_parse_byte(uint8_t byte)
     hi04_data.device_time_ms = hi04_decoder.hi91.system_time;
     hi04_data.frame_count++;
     hi04_data.received = 1;
+    hi04_last_frame_ms = BSP_DWT_GetTimeline_ms();
 }
 
 static void hi04_task(ULONG arg)
@@ -82,7 +84,7 @@ static void hi04_task(ULONG arg)
          * 用途: HI04 装在俯仰框上, 安装方向未知 —— 手动转 pitch, 看哪个分量的
          * rad/s 跟着变、正负怎么对应, 确定后删掉这段。 */
         static uint16_t log_div;
-        if (++log_div >= 250) /* 2ms × 250 = 500ms */
+        if (++log_div >= 500) /* 1ms × 500 = 500ms */
         {
             log_div = 0;
             LOG_I("f=%u gyro=%.3f/%.3f/%.3f rad/s | rpy=%.1f/%.1f/%.1f deg | crc=%u bad=%u", (unsigned)hi04_data.frame_count,
@@ -90,7 +92,9 @@ static void hi04_task(ULONG arg)
                   (double)hi04_data.pitch_deg, (double)hi04_data.yaw_deg, (unsigned)hi04_data.crc_errors, (unsigned)hi04_data.invalid_frames);
         }
 
-        tx_thread_sleep(2);
+        tx_thread_sleep(1); /* 1ms 轮询: HI04 自己就是 500Hz(2ms/帧), 任务周期从 2ms 降到 1ms
+                             * 可以把"帧到位→喂给解码器"的平均延迟减少 1ms, 是延迟优化里
+                             * 唯一不需要动模块配置就能做的一项 */
     }
 }
 
@@ -125,4 +129,15 @@ void Module_HI04_init(void)
     LOG_I("HI04 init success (USART1 @921600)");
 }
 
-const Hi04_Data_t *Module_HI04_get(void) { return hi04_data.received ? &hi04_data : NULL; }
+const Hi04_Data_t *Module_HI04_get(void)
+{
+    if (!hi04_data.received) return NULL;
+
+    /* 掉线检测: HI04 正常 500Hz, 50ms 没新帧就当挂了。
+     * 这一步必要: 否则 gyro 会卡在最后一个值, 速度环会一直满力矩推下去。 */
+    if (BSP_DWT_GetTimeline_ms() - hi04_last_frame_ms > HI04_TIMEOUT_MS) return NULL;
+
+    return &hi04_data;
+}
+
+const float *Module_HI04_get_gyro_ptr(void) { return hi04_data.gyro_rad_s; }

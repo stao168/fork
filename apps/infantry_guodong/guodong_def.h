@@ -44,6 +44,21 @@
  * ⚠ 绑定 2ms 任务周期, 改周期要同步改。 */
 #define GIMBAL_YAW_STICK_STEP_RAD    0.008628f
 
+/* -- pitch 闭环(角度环串速度环) -- */
+/* 速度环: 旧 Gimbal.c Kp=0.45、限幅 DM_J4310_TMAX。旧工程输出直给 MIT 力矩(N·m),
+ * measure 是 DM4310 输出轴 rad/s ⇒ 已经是 N·m/(rad/s) 口径, 不用换算。
+ * 方向已实测确认(ref/spd 同向、负反馈), 用回旧工程值。 */
+#define GIMBAL_PITCH_SPEED_KP        0.45f
+/* 积分: 旧工程 Ki=0, 但纯 P 遇到静摩擦会"一顿一顿"(推不动→误差累积→突然动→过冲)。
+ * 加一点积分把最后的静差吃掉, 动作会连续很多。延迟大的反馈源上 Ki 不能给多。 */
+#define GIMBAL_PITCH_SPEED_KI        0.05f
+#define GIMBAL_PITCH_INTEGRAL_LIMIT  2.0f
+/* 摇杆满杆对应的 pitch 目标角速度(rad/s)。测方向先给 3.0, 别让云台撞机械限位 */
+#define GIMBAL_PITCH_TEST_W_MAX      3.0f
+/* 【限位标定】DM4310 的 measure.total_angle + 这个偏置 = 旧工程 PitchDownLimt/PitchUpLimt
+ * 用的绝对角。旧车范围是 -0.72(低头) ~ -1.45(抬头); 本车先看日志 ang= 实测再填。 */
+#define PITCH_ANGLE_OFFSET_RAD       0.0f
+
 /* -- 底盘(全向轮; 旧工程文件名叫 Mecanum.c, 但实车是全向轮) -- */
 #define CHASSIS_WHEEL_RADIUS_M       0.081f    /* Mecanum_WheelRadius = 8.1cm */
 /* 实车: 40cm × 40cm 正方轮距, 轮子 ±45°。
