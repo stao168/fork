@@ -48,22 +48,48 @@
 /* 速度环: 旧 Gimbal.c Kp=0.45、限幅 DM_J4310_TMAX。旧工程输出直给 MIT 力矩(N·m),
  * measure 是 DM4310 输出轴 rad/s ⇒ 已经是 N·m/(rad/s) 口径, 不用换算。
  * 方向已实测确认(ref/spd 同向、负反馈), 用回旧工程值。 */
-#define GIMBAL_PITCH_SPEED_KP        0.45f
-/* 积分: 旧工程 Ki=0, 但纯 P 遇到静摩擦会"一顿一顿"(推不动→误差累积→突然动→过冲)。
- * 加一点积分把最后的静差吃掉, 动作会连续很多。延迟大的反馈源上 Ki 不能给多。 */
-#define GIMBAL_PITCH_SPEED_KI        0.05f
+#define GIMBAL_PITCH_SPEED_KP        0.30f
+/* 积分: 旧工程 Ki=0。实测 Ki=0.05 时低速有"一顿一顿"的临界感, 且重力已由
+ * GIMBAL_PITCH_FF_NM 前馈承担, 静态误差不是主要矛盾 ⇒ 先关积分, 需要再开。 */
+#define GIMBAL_PITCH_SPEED_KI        0.0f
 #define GIMBAL_PITCH_INTEGRAL_LIMIT  2.0f
 /* 摇杆满杆对应的 pitch 目标角速度(rad/s)。阶段3(只速度环)用, 上角度环后改用累加目标角 */
 #define GIMBAL_PITCH_TEST_W_MAX      3.0f
-/* 角度环: 旧 Gimbal.c Kp=45 [rad/s per rad]、限幅 12.566(=4π rad/s)。口径一致, 直接照搬。 */
+/* 角度环: 旧 Gimbal.c 就是 Kp=45 / MaxOut=12.566 / Ki=0 / Kd=0, 且它的闭环也在
+ * TIM6 里以 **2ms(500Hz)** 跑, 速度和本工程一样 —— 前提是两个环都用电机自己的
+ * Angle/Speed。之前 Kp=45 会震, 是因为当时内环订阅的是 HI04(装在框体上, 与电机
+ * 之间隔一层柔性), 属于非共位反馈, 不是增益的问题。
+ * 现在内环改回电机 Speed 后就可以直接用旧工程值: 位置刚度 = 45 × 0.45 = 20 N·m/rad。
+ * 若上电后出现高频"嗡"震, 依次退 30 → 20 (我们的 angle 环比旧工程多 0~2ms 任务间延迟)。 */
 #define GIMBAL_PITCH_ANGLE_KP        45.0f
 #define GIMBAL_PITCH_ANGLE_MAX_W     12.566f
+/* 【临时对比试验】pitch 角度反馈换成 HI04(装在俯仰框上的外置 IMU), 不用 DM4310 编码器:
+ * 编码器在电机侧, 中间隔 10:1 减速 + 联轴器回差, 框体真实角度未必跟得上指令。
+ * HI04 的欧拉角是 ±180° 卷绕的单圈角, 坐标系也和电机 total_angle 不同, 所以代码在
+ * 拿到第一帧有效数据时记下"HI04角 - 电机角"的偏置, 之后把 HI04 角平移对齐到电机坐标系,
+ * 已有的 pitch_target_rad / PITCH_LIMIT_* 继续有效。
+ * ⚠ 安装朝向未确认时先看日志: fb= 应跟 ang= 同向同幅变化。反了就把 SIGN 改 -1.0f;
+ *    如果 r= 不动而 p= 跟着动, 把 ROLL 改成 0。 */
+#define PITCH_HI04_FB_SIGN           1.0f
+#define PITCH_HI04_FB_ROLL           1 /* 1 = 用 roll_deg, 0 = 用 pitch_deg */
 /* 摇杆满杆时【每个周期】累加的目标角增量(rad)。旧工程 Gimbal_PitchLeverSpeedMapRate = 0.0015,
  * 且不看摇杆幅度; 我们乘上归一化值, 满杆 0.0015 rad/2ms = 0.75 rad/s(43°/s), 走完行程约 1.2s。 */
 #define GIMBAL_PITCH_STICK_STEP_RAD  0.0015f
-/* 【限位标定】DM4310 的 measure.total_angle + 这个偏置 = 旧工程 PitchDownLimt/PitchUpLimt
- * 用的绝对角。旧车范围是 -0.72(低头) ~ -1.45(抬头); 本车先看日志 ang= 实测再填。 */
-#define PITCH_ANGLE_OFFSET_RAD       0.0f
+/* 【慢外环】用 HI04 框体角吃掉传动回差: corr += KI × dt × (目标角 − 框体角), 加到目标上。
+ * 轻点摇杆的步进(0.5~0.9°)比回差(≈1.1°)还小, 光靠编码器环电机在回差内就"到位"了,
+ * 框体不动 ⇒ 顿。慢环会一直补到框体真到位。
+ * 带宽 = KI rad/s: 1.0 ≈ 0.16Hz, 必须远低于内环(≈3Hz)。调大=补得快但可能和内环打架。 */
+#define PITCH_IMU_CORR_KI            1.0f
+#define PITCH_IMU_CORR_LIMIT_RAD     0.15f /* 最多补 ±8.6°, 只够回差, 不允许跑偏 */
+/* 【限位标定】车上的 total_angle 与旧工程绝对角差一个常数偏置(旧工程叫 DM4310ZeroPitch)。
+ * 实测(俯仰头很沉, 断电就落到底部):
+ *   机械下限: ang = -0.99  ↔ HI04 r = +14.3°
+ *   抬到 ang = -1.45 时 HI04 r = -13.2°(Δang 0.46 rad ↔ Δr 27.5°, 1:1 对得上)
+ *   手动能抬到的机械上限: r = -39.9° ⇒ 推算 ang ≈ -1.94(行程 0.95 rad / 54°)
+ * 让机械下限对上旧工程 PitchDownLimt(-0.72): 偏置 = -0.72 - (-0.99) = +0.27, 取 0.29。
+ * ⇒ 软限位 [-1.45-0.29, -0.72-0.29] = [-1.74, -1.01], 行程 0.73 rad(42°), 距机械顶还剩 11°。
+ * 标定不对的症状: 上电后目标被夹、云台自己往上顶一下 ⇒ 把偏置往 +0.01 方向微调。 */
+#define PITCH_ANGLE_OFFSET_RAD       0.29f
 
 /* -- 底盘(全向轮; 旧工程文件名叫 Mecanum.c, 但实车是全向轮) -- */
 #define CHASSIS_WHEEL_RADIUS_M       0.081f    /* Mecanum_WheelRadius = 8.1cm */

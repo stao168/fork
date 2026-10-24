@@ -12,6 +12,7 @@
 #include "module_hi04.h"
 
 #include "bsp_def.h" /* APPS_STACK_SECTION 等板级宏 */
+#include "bsp_dwt.h"
 #include "bsp_uart.h"
 #include "hipnuc_dec.h"
 #include "tx_api.h"
@@ -21,7 +22,7 @@
 /* huart1 的声明(CubeMX 生成, dji_c 在 Inc/usart.h) */
 #include "usart.h"
 
-#define LOG_TAG "module_hi04"
+#define LOG_TAG "hi04" /* 短标签: 终端 80 列, 前缀越短有效信息越多 */
 #define LOG_LVL LOG_LVL_DBG
 #include "ulog_def.h"
 
@@ -87,9 +88,9 @@ static void hi04_task(ULONG arg)
         if (++log_div >= 500) /* 1ms × 500 = 500ms */
         {
             log_div = 0;
-            LOG_I("f=%u gyro=%.3f/%.3f/%.3f rad/s | rpy=%.1f/%.1f/%.1f deg | crc=%u bad=%u", (unsigned)hi04_data.frame_count,
-                  (double)hi04_data.gyro_rad_s[0], (double)hi04_data.gyro_rad_s[1], (double)hi04_data.gyro_rad_s[2], (double)hi04_data.roll_deg,
-                  (double)hi04_data.pitch_deg, (double)hi04_data.yaw_deg, (unsigned)hi04_data.crc_errors, (unsigned)hi04_data.invalid_frames);
+            LOG_I("rpy=%.1f/%.1f/%.1f | f=%u | gyro=%.3f/%.3f/%.3f | crc=%u bad=%u", (double)hi04_data.roll_deg, (double)hi04_data.pitch_deg,
+                  (double)hi04_data.yaw_deg, (unsigned)hi04_data.frame_count, (double)hi04_data.gyro_rad_s[0], (double)hi04_data.gyro_rad_s[1],
+                  (double)hi04_data.gyro_rad_s[2], (unsigned)hi04_data.crc_errors, (unsigned)hi04_data.invalid_frames);
         }
 
         tx_thread_sleep(1); /* 1ms 轮询: HI04 自己就是 500Hz(2ms/帧), 任务周期从 2ms 降到 1ms

@@ -29,7 +29,7 @@
 #include "motor_damiao.h"
 #include "motor_dji.h"
 
-#define LOG_TAG "app_gimbal"
+#define LOG_TAG "gim" /* 短标签: 串口终端只有 80 列, 前缀每省一个字符都是有效信息位 */
 #define LOG_LVL LOG_LVL_DBG
 #include "ulog_def.h"
 
@@ -39,6 +39,20 @@
 
 static DJI_Motor_t *yaw_motor   = NULL; /* Yaw: GM6020 @ CAN2 */
 static DM_Motor_t  *pitch_motor = NULL; /* Pitch: DM-J4310 @ CAN1(阶段2-B 不初始化) */
+
+/* 【临时】pitch 角度反馈 = HI04(俯仰框上的外置 IMU)。
+ * pitch_hi04_angle_rad 已平移对齐到电机坐标系, 直接注册给 angle_PID;
+ * 偏置在拿到第一帧有效数据时用"HI04角 - 电机角"捕获(见 gimbal_func)。 */
+static float   pitch_hi04_angle_rad;
+static float   pitch_hi04_offset_rad;
+static uint8_t pitch_hi04_offset_ready;
+
+/* pitch 目标角(rad, 电机坐标系): 摇杆累加而成。DM4310 重新上线时要按当时角度重建,
+ * 所以放到文件作用域(掉线分支也要能清它) */
+static float   pitch_target_rad;
+static uint8_t pitch_target_inited;
+static uint8_t pitch_stop_reason; /* 0=闭环中, 1=HI04 掉线, 2=DM4310 掉线(仅用于日志去重) */
+static float   pitch_imu_corr;    /* 慢外环输出: 补传动回差, 直接加在目标角上(rad) */
 
 const static Ins_t           *ins        = NULL;
 const static Bmi088_device_t *bmi088_dev = NULL;
@@ -111,25 +125,32 @@ void gimbal_init(void)
             },
         .controller_init_config =
             {
-                /* 速度反馈用 HI04 的 gyro[1](装在俯仰框上, 实测该分量即俯仰角速度);
-                 * 角度反馈仍是 DM4310 输出轴编码器(旧工程同款) */
+                /* 【双环反馈源】
+                 *   角度环 = DM4310 编码器(16bit / ±12.5rad ⇒ 0.022°, 绝对角、无卷绕无零漂)
+                 *   速度环 = HI04 gyro[1](500Hz 原始角速度: 噪声 ~0.005 rad/s, 分辨率远好于
+                 *            DM4310 反馈里的 12bit 速度 —— 那个只有 60/4096 = 0.0146 rad/s/LSB,
+                 *            而且是电机内部估算, 带滞后)。阻尼那一路用陀螺是真提升。
+                 * ⚠ 不要再用 HI04 的欧拉角做角度环: 它是融合滤波输出, 实测大角速度下比编码器
+                 *   差 0.1s, 送进 500Hz 位置环会直接自激(out 冲到 3.45N·m, DM4310 掉线)。 */
                 .other_speed_feedback_ptr = Module_HI04_get_gyro_ptr() + 1,
-                .angle_PID                = {.Kp = GIMBAL_PITCH_ANGLE_KP, .MaxOut = GIMBAL_PITCH_ANGLE_MAX_W},
-                .speed_PID                = {.Kp            = GIMBAL_PITCH_SPEED_KP,
-                                             .Ki            = GIMBAL_PITCH_SPEED_KI,
-                                             .MaxOut        = TMAX_DM4310,
-                                             .IntegralLimit = GIMBAL_PITCH_INTEGRAL_LIMIT,
-                                             .Improve       = PID_Integral_Limit},
+                /* 角度环输出 rad/s(喂养速度环); 速度环输出 N·m。速度环就是阻尼项:
+                 * 纯位置环 Kp=6 实测 1.7Hz 等幅振荡(spd 到 5.2 rad/s), 加回速度环才收得住 */
+                .angle_PID = {.Kp = GIMBAL_PITCH_ANGLE_KP, .MaxOut = GIMBAL_PITCH_ANGLE_MAX_W},
+                .speed_PID = {.Kp            = GIMBAL_PITCH_SPEED_KP,
+                              .Ki            = GIMBAL_PITCH_SPEED_KI,
+                              .MaxOut        = TMAX_DM4310,
+                              .IntegralLimit = GIMBAL_PITCH_INTEGRAL_LIMIT,
+                              .Improve       = PID_Integral_Limit},
             },
         .setting_init_config =
             {
                 .algorithm_type        = CONTROL_PID,
-                .loop_type             = ANGLE_AND_SPEED_LOOP, /* 阶段4: 角度环串速度环 */
-                .angle_feedback_source = 0,
-                .speed_feedback_source = 1, /* HI04 gyro[1](500Hz + 串口延迟);
-                                             * 改回 0 则用 DM4310 自带 Speed(延迟低但噪声大) */
-                .feedback_reverse_flag = 0, /* TODO(阶段3):按实测确认(HI04 方向) */
-                .motor_reverse_flag    = 0, /* TODO(阶段3):按实测确认 */
+                .loop_type             = ANGLE_AND_SPEED_LOOP, /* 角度环串速度环: 速度环提供阻尼 */
+                .angle_feedback_source = 0,                    /* DM4310 编码器(0.022°, 绝对角) */
+                .speed_feedback_source = 1,                    /* HI04 gyro[1](500Hz 原始角速度, 精度高于
+                                                                * DM4310 的 12bit 速度; 改 0 则回到电机速度) */
+                .feedback_reverse_flag = 0,                    /* TODO(阶段3):按实测确认(HI04 方向) */
+                .motor_reverse_flag    = 0,                    /* TODO(阶段3):按实测确认 */
             },
         .motor_init_info = {.motor_type = DM4310, .gear_ratio = 10, .max_torque = TMAX_DM4310, .torque_constant = KT_DM4310}};
     pitch_motor = Motor_DM_Init(&pitch_config, DM_MIT_MODE);
@@ -198,19 +219,53 @@ void gimbal_func(Gimbal_Ctrl_Cmd_t *gimbal_cmd, uint16_t *yaw_ecd)
         {
             /* HI04 没数据/掉线: 没有速度反馈就不能闭速度环, 直接断力
              * (否则 gyro 卡在旧值, PID 会一直满力矩推下去) */
+            if (pitch_stop_reason != 1) /* 只在状态变化时打一行, 否则 500Hz 刷屏 */
+            {
+                pitch_stop_reason = 1;
+                LOG_W("pitch stop: HI04 lost");
+            }
+            pitch_imu_corr = 0.0f; /* 掉线期间 pitch_hi04_angle_rad 是旧值, 别拿它积分 */
+            Motor_Stop((Motor_Base *)pitch_motor);
+        }
+        else if (Module_Offline_get_device_status(pitch_motor->base.offline_dev) != STATE_ONLINE)
+        {
+            /* DM4310 还没回帧(电机没上电 / CAN 断): 此时 measure.total_angle 还是 0,
+             * 拿它初始化目标会被 VAL_LIMIT 夹到限位, 一上电就是满力矩撞过去。
+             * 等有真实反馈再初始化; 掉线时清标志, 重新上线按当时角度重建目标和 HI04 偏置。 */
+            if (pitch_stop_reason != 2)
+            {
+                pitch_stop_reason = 2;
+                /* 达妙错误码: 8=过压 9=欠压 10=过流 11=MOS过温 12=线圈过温 13=通讯丢失 14=过载
+                 * (断线时这里是最后一帧的值) */
+                LOG_W("pitch stop: DM4310 offline (err=%d Tmos=%.0f Tc=%.0f)", (int)pitch_motor->measure.Error_Code,
+                      (double)pitch_motor->measure.T_Mos, (double)pitch_motor->measure.T_Rotor);
+            }
+            pitch_target_inited     = 0;
+            pitch_hi04_offset_ready = 0;
+            pitch_imu_corr          = 0.0f;
             Motor_Stop((Motor_Base *)pitch_motor);
         }
         else
         {
+            pitch_stop_reason       = 0;
             const Hi04_Data_t *hi04 = Module_HI04_get();
             const float        spd  = hi04->gyro_rad_s[1];
             const float        out  = pitch_motor->base.controller.output_torque;
             static uint16_t    blk_cnt;
 
-            /* ---- 【阶段4 角度环】摇杆累加目标角, 目标角直接夹在限位里(旧 Gimbal.c 同款) ---- */
-            static float   pitch_target_rad;
-            static uint8_t pitch_target_inited;
+            /* HI04 角度只做日志对照(不再进闭环): 欧拉角是 ±180° 卷绕的单圈角, 坐标系也和
+             * 电机不同, 所以首帧用"HI04角 - 电机角"记下偏置, 之后平移到电机坐标系,
+             * 这样日志里 fb= 可以直接和 ang= 对比, 差值就是这套机构的柔性/回差。 */
+            const float hi04_angle_rad = PITCH_HI04_FB_SIGN * (PITCH_HI04_FB_ROLL ? hi04->roll_deg : hi04->pitch_deg) * (PI / 180.0f);
+            if (!pitch_hi04_offset_ready)
+            {
+                pitch_hi04_offset_rad   = hi04_angle_rad - pitch_motor->base.measure.total_angle;
+                pitch_hi04_offset_ready = 1;
+            }
+            pitch_hi04_angle_rad = hi04_angle_rad - pitch_hi04_offset_rad;
 
+            /* 与旧工程 Gimbal_PitchControl() 同构: 摇杆累加目标角 → 角度环绕速度环。
+             * 两个环的反馈都是 DM4310 自己的 Angle/Speed(见 gimbal_init 里的注释)。 */
             if (!pitch_target_inited)
             {
                 /* 第一次用当前角度初始化, 避免目标与实测差很多时云台猛甩 */
@@ -222,8 +277,7 @@ void gimbal_func(Gimbal_Ctrl_Cmd_t *gimbal_cmd, uint16_t *yaw_ecd)
             /* 限位: 旧工程把 Target 夹在 [-1.45, -0.72]; 用车上的 total_angle 时要减掉标定偏置 */
             VAL_LIMIT(pitch_target_rad, PITCH_LIMIT_UP_RAD - PITCH_ANGLE_OFFSET_RAD, PITCH_LIMIT_DOWN_RAD - PITCH_ANGLE_OFFSET_RAD);
 
-            /* 堵转 / 撞机械限位保护: 角度环会持续出力试图到位, 卡住时表现为 "力矩很大却没转速"。
-             * 不需要 ref 判断 —— 静止时输出只有前馈(-0.85), 远小于 0.5*TMAX, 不会误触发。 */
+            /* 堵转 / 撞机械限位保护: 到目标静止时输出只有前馈(-0.85), 远小于 0.5*TMAX, 不会误触发 */
             if (fabsf(spd) < 0.15f && fabsf(out) > 0.5f * TMAX_DM4310)
             {
                 if (++blk_cnt >= 50) /* 2ms × 50 = 100ms */
@@ -242,9 +296,28 @@ void gimbal_func(Gimbal_Ctrl_Cmd_t *gimbal_cmd, uint16_t *yaw_ecd)
             }
 
             Motor_Start((Motor_Base *)pitch_motor);
-            Motor_SetRef((Motor_Base *)pitch_motor, pitch_target_rad); /* 角度环 ref = 目标角(rad) */
-            /* 重力前馈: 旧工程常数 -0.85 N·m, 减轻速度环和积分的负担。
-             * ⚠ 符号按实车确认: 加上后若云台掉得更快, 把 GIMBAL_PITCH_FF_NM 取反。 */
+
+            /* ---- 慢外环: 用 HI04 的框体角吃掉传动回差 ----
+             * 轻点摇杆时目标只走 0.5~0.9°(0.0015rad × 几下), 而传动回差实测约 1.1°。
+             * 电机在回差内转完就 "到位" 了(编码器在电机侧), 框体却没动 ⇒ 顿一下。
+             * 这里把 (目标角 - 框体角) 以 0.16Hz 量级慢慢积分进目标, 直到框体真的到位。
+             * 带宽必须远低于内环(≈3Hz)和回差抖动, 否则会和内环打架。 */
+            const float ref_lim_lo = PITCH_LIMIT_UP_RAD - PITCH_ANGLE_OFFSET_RAD;
+            const float ref_lim_hi = PITCH_LIMIT_DOWN_RAD - PITCH_ANGLE_OFFSET_RAD;
+            float       ref_eff    = pitch_target_rad + pitch_imu_corr;
+
+            /* 只往 "拉回目标" 的方向积分; 有效目标已经顶到软限位就不再积分(防饱和) */
+            const float imu_err = pitch_target_rad - pitch_hi04_angle_rad;
+            if ((imu_err < 0.0f && ref_eff > ref_lim_lo) || (imu_err > 0.0f && ref_eff < ref_lim_hi))
+            {
+                pitch_imu_corr += PITCH_IMU_CORR_KI * 0.002f * imu_err;
+                VAL_LIMIT(pitch_imu_corr, -PITCH_IMU_CORR_LIMIT_RAD, PITCH_IMU_CORR_LIMIT_RAD);
+                ref_eff = pitch_target_rad + pitch_imu_corr;
+            }
+            VAL_LIMIT(ref_eff, ref_lim_lo, ref_lim_hi);
+
+            Motor_SetRef((Motor_Base *)pitch_motor, ref_eff); /* 双环: ref = 目标角 + 慢环修正 */
+            /* 重力前馈: 旧工程 pitch_feedforward = -0.85, 直接加在速度环输出上 */
             Motor_SetForwardTorque((Motor_Base *)pitch_motor, GIMBAL_PITCH_FF_NM);
         }
     }
@@ -254,12 +327,18 @@ void gimbal_func(Gimbal_Ctrl_Cmd_t *gimbal_cmd, uint16_t *yaw_ecd)
     {
         log_div                 = 0;
         const Hi04_Data_t *hi04 = Module_HI04_get();
-        LOG_I("yaw tgt=%.2f ref=%.2f spd=%.2f out=%.2f | pitch tgt=%.2f ang=%.2f spd=%.2f out=%.2f r=%.1f%s", (double)yaw_target_rad,
-              (double)yaw_motor->base.controller.angle_PID.Output, (double)bmi088_dev->gyro[2], (double)yaw_motor->base.controller.output_torque,
-              (pitch_motor != NULL) ? (double)pitch_motor->base.controller.ref : 0.0,
-              (pitch_motor != NULL) ? (double)pitch_motor->base.measure.total_angle : 0.0, hi04 ? (double)hi04->gyro_rad_s[1] : 0.0,
-              (pitch_motor != NULL) ? (double)pitch_motor->base.controller.output_torque : 0.0, hi04 ? (double)hi04->roll_deg : 0.0,
-              (hi04 != NULL) ? "" : " [HI04 LOST]");
+
+        /* 终端只有 80 列, 所以最要紧的 pitch 闭环量放行首:
+         *   fb  = 送进 PID 的 HI04 角(已对齐到电机坐标系)  ang = 电机 total_angle(核对对齐)
+         *   out = 输出力矩  r = HI04 roll_deg(俯仰框角度)  tgt = 目标角
+         *   spd = HI04 gyro[1](俯仰角速度, 堵转判据用) */
+        const float p_tgt = (pitch_motor != NULL) ? pitch_motor->base.controller.ref : 0.0f;
+        const float p_ang = (pitch_motor != NULL) ? pitch_motor->base.measure.total_angle : 0.0f;
+        const float p_out = (pitch_motor != NULL) ? pitch_motor->base.controller.output_torque : 0.0f;
+
+        LOG_I("P fb=%.2f ang=%.2f out=%.2f r=%.1f | tgt=%.2f spd=%.2f | Y tgt=%.2f out=%.2f%s", (double)pitch_hi04_angle_rad, (double)p_ang,
+              (double)p_out, hi04 ? (double)hi04->roll_deg : 0.0, (double)p_tgt, hi04 ? (double)hi04->gyro_rad_s[1] : 0.0, (double)yaw_target_rad,
+              (double)yaw_motor->base.controller.output_torque, (hi04 != NULL) ? "" : " [HI04 LOST]");
     }
 }
 

@@ -89,8 +89,10 @@ void robot_control_init(void)
     /* 两块板硬件完全相同, 烧错镜像只能靠日志认出来 */
     LOG_I("boot: infantry_guodong GIMBAL board firmware (MOTOR=%d)", MODULE_MOTOR);
 
-    status = tx_thread_create(&robot_control_thread, "robot_control_thread", robot_control_task, 0, robot_control_thread_stack, 1024, 30, 30,
-                              TX_NO_TIME_SLICE, TX_AUTO_START);
+    /* 线程名 "rc": ulog 每条日志都会打印线程名, 串口终端只有 80 列,
+     * 原名 robot_control_thread 白占 20 个字符, 缩短后 500ms 那行才有地方放数据 */
+    status = tx_thread_create(&robot_control_thread, "rc", robot_control_task, 0, robot_control_thread_stack, 1024, 30, 30, TX_NO_TIME_SLICE,
+                              TX_AUTO_START);
     if (status != TX_SUCCESS)
     {
         LOG_E("robot_control_task failed!");
